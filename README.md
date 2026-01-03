@@ -83,7 +83,7 @@ As of now, only the change detection is functional. This module can be used on i
 
 
 ## Todos
-Until ICCV, the missing modules required to replicate our method will be released. These modules are planned to be slightly upgraded to incorporate improvements made in the meantime, such as those to 3DGS.
+I continue to release the missing modules required to replicate our method. These modules are planned to be slightly upgraded to incorporate improvements made in the meantime, such as those to 3DGS.
 
 - [x] Release initial codebase with framework skeleton.
 - [x] Release camera estimation script.
