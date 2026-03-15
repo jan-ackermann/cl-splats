@@ -12,6 +12,7 @@ from clsplats.utils.custom_types import Image
 from clsplats.dataset.cameras import Camera
 from clsplats.dataset.dataset_reader import SceneInfo
 from clsplats.lifter.depth_anything_lifter import DepthAnythingLifter
+from clsplats.constraints.primitives import fit_primitives_for_active, union_distance
 
 
 class CLSplatsTrainer:
@@ -26,6 +27,9 @@ class CLSplatsTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.timestep = 0
         self.active_mask = None  # mask of gaussians affected by current scene change
+        self._primitives = []    # list of primitives per timestep
+        self._outside_counts = None  # track consecutive outside steps per gaussian
+        self._global_step = 0
 
         # 1) Initialize gaussians from scene point cloud
         pcd = scene.point_cloud
@@ -88,8 +92,17 @@ class CLSplatsTrainer:
         if len(self.train_cameras) == 0:
             self.active_mask = None
             return
-        # At a scene change, detect which region changed once per view and
-        # derive the subset of gaussians to optimize using the lifter.
+        # t0: regular Gaussian splatting (no change detection / lifting).
+        # All gaussians are trainable, and we do not fit primitives or prune.
+        start_time = getattr(self.cfg.train, "start_time", 0)
+        if timestep == start_time:
+            N = self.gaussians.params.positions.shape[0]
+            self.active_mask = torch.ones(N, dtype=torch.bool, device=self.device)
+            self._primitives = []
+            self._outside_counts = None
+            return
+
+        # t1 and onwards: detect changed regions and derive subset to optimize.
         change_masks = []
         for cam in self.train_cameras:
             rendered = self._render_camera(cam)
@@ -106,6 +119,19 @@ class CLSplatsTrainer:
             cameras=self.train_cameras,
             change_masks=change_masks,
         )
+
+        # Fit geometric primitives around active Gaussians for this timestep
+        if self.active_mask is not None and self.active_mask.any():
+            self._primitives = [
+                prim
+                for _, prim in fit_primitives_for_active(
+                    positions=self.gaussians.params.positions.detach(),
+                    active_mask=self.active_mask.detach(),
+                    radius_frac=getattr(self.cfg.get("constraints", {}), "group_radius_frac", 0.1),
+                )
+            ]
+        else:
+            self._primitives = []
 
     def _render_camera(self, cam: Camera) -> Image:
         """
@@ -157,13 +183,29 @@ class CLSplatsTrainer:
         gt = cam.original_image.permute(1, 2, 0).contiguous()  # [H, W, 3]
 
         photometric_loss = (rendered - gt).pow(2).mean()
-        total_loss = photometric_loss
+
+        d_union_full = None
+        # Soft constraint to keep active Gaussians within fitted primitives
+        # Only apply from t1 onwards; t0 should be regular 3DGS training.
+        start_time = getattr(self.cfg.train, "start_time", 0)
+        if self.timestep > start_time and self.active_mask is not None and self._primitives:
+            pts = self.gaussians.params.positions
+            d_union_full = union_distance(pts, self._primitives)  # [N]
+            # Only penalize active Gaussians
+            mask = self.active_mask.to(self.device)
+            if mask.any():
+                loss_bound = d_union_full[mask].mean()
+                lambda_bound = getattr(self.cfg.get("constraints", {}), "lambda_bound", 0.0)
+                total_loss = photometric_loss + lambda_bound * loss_bound
+            else:
+                total_loss = photometric_loss
+        else:
+            total_loss = photometric_loss
         total_loss.backward()
 
-        # Restrict optimization to gaussians selected by active_mask:
-        # we keep all gaussians in the forward pass, but only this subset
-        # receives gradient updates.
-        if self.active_mask is not None:
+        # Restrict optimization to gaussians selected by active_mask from t1+.
+        # On t0, all gaussians are trained as in regular 3DGS.
+        if self.timestep > start_time and self.active_mask is not None:
             mask = self.active_mask.to(self.device)
             # Broadcast mask to parameter shapes and zero out grads for inactive gaussians
             def apply_mask(param, extra_dims: int = 0):
@@ -179,6 +221,48 @@ class CLSplatsTrainer:
             apply_mask(self.gaussians.params.opacity, extra_dims=1)        # (N, 1)
 
         self.gaussians.step_optimizer()
+
+        # Hard pruning with hysteresis: only prune gaussians that have been
+        # outside the allowed region for several consecutive checks.
+        if (
+            self.timestep > start_time
+            and d_union_full is not None
+            and self.active_mask is not None
+            and self._primitives
+        ):
+            prune_every = getattr(self.cfg.get("constraints", {}), "prune_every", 50)
+            prune_dist = getattr(self.cfg.get("constraints", {}), "prune_dist_thresh", 0.02)
+            prune_consec = getattr(self.cfg.get("constraints", {}), "prune_consecutive", 3)
+            if self._global_step % prune_every == 0:
+                N = self.gaussians.params.positions.shape[0]
+                if self._outside_counts is None or self._outside_counts.shape[0] != N:
+                    self._outside_counts = torch.zeros(N, dtype=torch.int64, device=self.device)
+                outside = d_union_full > prune_dist
+                # Update consecutive outside counters
+                self._outside_counts[outside] += 1
+                self._outside_counts[~outside] = 0
+                prune_mask = self._outside_counts >= prune_consec
+                if prune_mask.any():
+                    keep = self.gaussians.prune_gaussians(prune_mask)
+                    # Update bookkeeping tensors
+                    self.active_mask = self.active_mask[keep]
+                    self._outside_counts = self._outside_counts[keep]
+                    # Re-fit primitives on the remaining active gaussians
+                    if self.active_mask.any():
+                        self._primitives = [
+                            prim
+                            for _, prim in fit_primitives_for_active(
+                                positions=self.gaussians.params.positions.detach(),
+                                active_mask=self.active_mask.detach(),
+                                radius_frac=getattr(
+                                    self.cfg.get("constraints", {}), "group_radius_frac", 0.1
+                                ),
+                            )
+                        ]
+                    else:
+                        self._primitives = []
+
+        self._global_step += 1
 
         return {"loss": float(total_loss.detach().cpu())}
 

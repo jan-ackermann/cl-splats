@@ -62,9 +62,14 @@ class CLGaussians:
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
 
-    def prune_gaussians(self, prune_mask: torch.Tensor) -> None:
+    def prune_gaussians(self, prune_mask: torch.Tensor) -> torch.Tensor:
         """
         Remove gaussians where prune_mask[i] is True.
+
+        Returns:
+            keep_mask: boolean mask of shape (N_kept,) indicating which of the
+            previous gaussians remain after pruning. This can be used by
+            callers to update any per-gaussian bookkeeping tensors.
         """
         prune_mask = prune_mask.to(self.device)
         keep = ~prune_mask
@@ -77,6 +82,7 @@ class CLGaussians:
         self.params.quats = _filter(self.params.quats)
         self.params.sh_features = _filter(self.params.sh_features)
         self.params.opacity = _filter(self.params.opacity)
+        return keep
 
     def split_gaussians(self, active_mask: torch.Tensor) -> None:
         """
