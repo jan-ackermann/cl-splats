@@ -4,6 +4,8 @@ import omegaconf
 import torch
 from PIL import Image as PILImage
 
+from gsplat.rendering import rasterization
+
 from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 from clsplats.change_detection.dinov2_detector import DinoV2Detector
 from clsplats.utils.custom_types import Image
@@ -107,12 +109,48 @@ class CLSplatsTrainer:
 
     def _render_camera(self, cam: Camera) -> Image:
         """
-        Temporary placeholder renderer.
-        For now, return the ground-truth image so that the rest of the
-        pipeline (change detection, lifting, training loop) can be
-        exercised without depending on the exact gsplat API.
+        Render using gsplat's 3DGS rasterization for a single camera.
         """
-        return cam.original_image.permute(1, 2, 0).contiguous()
+        device = self.device
+        means = self.gaussians.params.positions.to(device)          # [N, 3]
+        quats = self.gaussians.params.quats.to(device)              # [N, 4]
+        scales = self.gaussians.params.scales.to(device)            # [N, 3]
+        opacities = self.gaussians.params.opacity.squeeze(-1).to(device)  # [N]
+
+        # SH features are stored as [N, 3, K]; gsplat expects [N, K, 3]
+        sh_feats = self.gaussians.params.sh_features.to(device)     # [N, 3, K]
+        colors = sh_feats.permute(0, 2, 1).contiguous()             # [N, K, 3]
+
+        # Single-camera batch: viewmats [1, 4, 4], Ks [1, 3, 3]
+        viewmats = cam.world_view_transform.to(device).unsqueeze(0)
+        Ks = torch.zeros(1, 3, 3, device=device, dtype=means.dtype)
+        Ks[..., 0, 0] = cam.fx
+        Ks[..., 1, 1] = cam.fy
+        Ks[..., 0, 2] = cam.cx
+        Ks[..., 1, 2] = cam.cy
+        Ks[..., 2, 2] = 1.0
+
+        width = cam.image_width
+        height = cam.image_height
+
+        render_colors, render_alphas, _ = rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=viewmats,   # [1,4,4]
+            Ks=Ks,               # [1,3,3]
+            width=width,
+            height=height,
+             sh_degree=getattr(self.cfg.model, "sh_degree", 0),
+            packed=False,
+            distributed=False,
+        )
+
+        # render_colors: [1, H, W, 3] for RGB mode
+        img = render_colors[0]  # [H, W, 3]
+        return img.contiguous()
 
     def _train_step(self, cam: Camera):
         rendered = self._render_camera(cam)
@@ -122,8 +160,24 @@ class CLSplatsTrainer:
         total_loss = photometric_loss
         total_loss.backward()
 
-        # TODO: restrict optimization to gaussians selected by self.active_mask by
-        # masking gradients or using separate parameter groups.
+        # Restrict optimization to gaussians selected by active_mask:
+        # we keep all gaussians in the forward pass, but only this subset
+        # receives gradient updates.
+        if self.active_mask is not None:
+            mask = self.active_mask.to(self.device)
+            # Broadcast mask to parameter shapes and zero out grads for inactive gaussians
+            def apply_mask(param, extra_dims: int = 0):
+                if param.grad is None:
+                    return
+                view_shape = (mask.shape[0],) + (1,) * extra_dims
+                param.grad *= mask.view(*view_shape)
+
+            apply_mask(self.gaussians.params.positions, extra_dims=1)      # (N, 3)
+            apply_mask(self.gaussians.params.scales, extra_dims=1)         # (N, 3)
+            apply_mask(self.gaussians.params.quats, extra_dims=1)          # (N, 4)
+            apply_mask(self.gaussians.params.sh_features, extra_dims=2)    # (N, C, K)
+            apply_mask(self.gaussians.params.opacity, extra_dims=1)        # (N, 1)
+
         self.gaussians.step_optimizer()
 
         return {"loss": float(total_loss.detach().cpu())}
