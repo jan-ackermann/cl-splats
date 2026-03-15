@@ -10,6 +10,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import math
+
 import torch
 from torch import nn
 import numpy as np
@@ -88,7 +90,32 @@ class Camera(nn.Module):
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
-        
+
+    @property
+    def Twc(self):
+        """Camera-to-world transform (inverse of world_view_transform)."""
+        return torch.inverse(self.world_view_transform)
+
+    @property
+    def fx(self) -> float:
+        """Focal length in x derived from FoVx and image width."""
+        return 0.5 * self.image_width / math.tan(self.FoVx * 0.5)
+
+    @property
+    def fy(self) -> float:
+        """Focal length in y derived from FoVy and image height."""
+        return 0.5 * self.image_height / math.tan(self.FoVy * 0.5)
+
+    @property
+    def cx(self) -> float:
+        """Principal point x (pixel center)."""
+        return (self.image_width - 1) * 0.5
+
+    @property
+    def cy(self) -> float:
+        """Principal point y (pixel center)."""
+        return (self.image_height - 1) * 0.5
+
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
         self.image_width = width
