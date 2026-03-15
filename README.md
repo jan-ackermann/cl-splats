@@ -76,14 +76,14 @@ path/to/your/input/
 
 
 ### Running CL-Splats
-As of now, only the change detection is functional. This module can be used on its own but please wait for the rest of the framework to be added.
+As of now, the modules were reimplemented using gsplat. While they can be run, I yet have to verify that they work.
 
 > **Note:**  
-> Note that as of now, not the complete pipeline is released. Please refer to [Todos](#todos) to see the progress of releases.
+> Please refer to [Todos](#todos) to see the progress of releases.
 
 
 ## Todos
-I continue to release the missing modules required to replicate our method. These modules are planned to be slightly upgraded to incorporate improvements made in the meantime, such as those to 3DGS.
+I continue to release the missing modules required to replicate our method.
 
 - [x] Release initial codebase with framework skeleton.
 - [x] Release camera estimation script.
