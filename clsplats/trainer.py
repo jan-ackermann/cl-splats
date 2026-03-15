@@ -2,8 +2,7 @@ from typing import List
 
 import omegaconf
 import torch
-
-import gsplat.rendering as rendering
+from PIL import Image as PILImage
 
 from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 from clsplats.change_detection.dinov2_detector import DinoV2Detector
@@ -55,7 +54,29 @@ class CLSplatsTrainer:
         self.gaussians = CLGaussians(cfg, params)
 
         # 2) Cameras and change detector
-        self.train_cameras: List[Camera] = scene.train_cameras
+        # Wrap CameraInfo objects into our own Camera instances on CPU.
+        self.train_cameras: List[Camera] = []
+        for uid, cam_info in enumerate(scene.train_cameras):
+            img = PILImage.open(cam_info.image_path)
+            resolution = (cam_info.width, cam_info.height)
+            cam = Camera(
+                resolution=resolution,
+                colmap_id=cam_info.uid,
+                R=cam_info.R,
+                T=cam_info.T,
+                FoVx=cam_info.FovX,
+                FoVy=cam_info.FovY,
+                depth_params=cam_info.depth_params,
+                image=img,
+                invdepthmap=None,
+                image_name=cam_info.image_name,
+                uid=uid,
+                data_device="cpu",
+                train_test_exp=False,
+                is_test_dataset=False,
+                is_test_view=cam_info.is_test,
+            )
+            self.train_cameras.append(cam)
         self.detector = DinoV2Detector(cfg.change)
         self.lifter = DepthAnythingLifter(cfg)
 
@@ -86,26 +107,12 @@ class CLSplatsTrainer:
 
     def _render_camera(self, cam: Camera) -> Image:
         """
-        Render using gsplat for a single camera.
-        Assumes Camera exposes world_view_transform and projection_matrix
-        as (4, 4) CUDA tensors.
+        Temporary placeholder renderer.
+        For now, return the ground-truth image so that the rest of the
+        pipeline (change detection, lifting, training loop) can be
+        exercised without depending on the exact gsplat API.
         """
-        world_view = cam.world_view_transform  # (4, 4)
-        proj = cam.projection_matrix           # (4, 4)
-
-        rendered = rendering.render(
-            positions=self.gaussians.params.positions,
-            scales=self.gaussians.params.scales,
-            quats=self.gaussians.params.quats,
-            sh_features=self.gaussians.params.sh_features,
-            opacity=self.gaussians.params.opacity,
-            world_to_cam=world_view,
-            projection=proj,
-            image_height=cam.image_height,
-            image_width=cam.image_width,
-        )
-        rendered = rendered.permute(1, 2, 0).contiguous()  # [H, W, 3]
-        return rendered
+        return cam.original_image.permute(1, 2, 0).contiguous()
 
     def _train_step(self, cam: Camera):
         rendered = self._render_camera(cam)

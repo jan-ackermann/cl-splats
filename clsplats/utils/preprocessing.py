@@ -71,11 +71,24 @@ def check_and_run_colmap(input_dir):
         "--Mapper.ba_global_function_tolerance", "0.000001"
     ], check=True)
 
-    mapper_output = sparse_dir / "0"
-    if len(list(sparse_dir.iterdir())) == 0:
+    # Select a single reconstruction to be used downstream.
+    recon_dirs = sorted([d for d in sparse_dir.iterdir() if d.is_dir()])
+    if not recon_dirs:
         raise RuntimeError("No sparse reconstruction found.")
-    elif len(list(sparse_dir.iterdir())) > 1:
-        raise RuntimeError("Multiple sparse reconstructions found.")
+    if len(recon_dirs) > 1:
+        # Prefer reconstruction '0' if present, otherwise take the first.
+        zero_dir = sparse_dir / "0"
+        if zero_dir in recon_dirs:
+            mapper_output = zero_dir
+        else:
+            mapper_output = recon_dirs[0]
+        print(
+            f"[preprocessing] Warning: multiple sparse reconstructions found "
+            f"({[d.name for d in recon_dirs]}), using '{mapper_output.name}'.",
+            file=sys.stderr,
+        )
+    else:
+        mapper_output = recon_dirs[0]
 
     # For each remaining t* (t1, t2, ...)
     for t_dir in t_dirs[1:]:
