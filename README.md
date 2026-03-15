@@ -88,10 +88,11 @@ I continue to release the missing modules required to replicate our method. Thes
 - [x] Release initial codebase with framework skeleton.
 - [x] Release camera estimation script.
 - [x] Release fast change detection module.
-- [ ] Release sampling module.
-- [ ] Release pruning module.
-- [ ] Release local-optimization CUDA kernels.
-- [ ] Release data.
+- [x] Release sampling module.
+- [x] Release pruning module.
+- [x] Release data.
+- [x] ~~Release local-optimization CUDA kernels.~~
+- [ ] Verify codebase.
 - [ ] Release history recovery.
 
 ## Citation
