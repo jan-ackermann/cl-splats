@@ -1,27 +1,20 @@
 """
-Unit tests for bugs identified in the cl-splats codebase.
+Unit tests for the cl-splats codebase.
 
-Each test targets a specific bug from the bug report and verifies
-the bug exists (test should PASS when the bug is present).
-
+Tests verify that all 16 previously-identified bugs are now FIXED.
 Tests are designed to be self-contained and mock external dependencies
-(gsplat, transformers, etc.) to focus on the specific bug logic.
+(gsplat, transformers, etc.) to focus on the specific logic.
 """
+
 import ast
-import importlib
-import inspect
-import math
-import os
 import sys
-import textwrap
 import types
 from pathlib import Path
 from unittest import mock
 
-import numpy as np
+import omegaconf
 import pytest
 import torch
-import omegaconf
 
 # Project root for source-code-level tests
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,33 +29,34 @@ def _mock_gsplat():
     """Install a mock gsplat module so cl_gaussians can be imported."""
     if "gsplat" not in sys.modules:
         mock_gsplat = types.ModuleType("gsplat")
-        mock_gsplat.Strategy = type("Strategy", (), {})
-        mock_gsplat.DefaultStrategy = type("DefaultStrategy", (), {})
+        mock_gsplat.Strategy = type("Strategy", (), {})  # type: ignore
+        mock_gsplat.DefaultStrategy = type("DefaultStrategy", (), {})  # type: ignore
         sys.modules["gsplat"] = mock_gsplat
-    # Also need gsplat.rendering for trainer
     if "gsplat.rendering" not in sys.modules:
         mock_rendering = types.ModuleType("gsplat.rendering")
-        mock_rendering.rasterization = mock.MagicMock()
+        mock_rendering.rasterization = mock.MagicMock()  # type: ignore
         sys.modules["gsplat.rendering"] = mock_rendering
-    # Remove cached cl_gaussians module to force re-import with mock
+    if "gsplat.exporter" not in sys.modules:
+        mock_exporter = types.ModuleType("gsplat.exporter")
+        mock_exporter.export_splats = mock.MagicMock()  # type: ignore
+        sys.modules["gsplat.exporter"] = mock_exporter
+    # Force re-import of cl_gaussians
     for mod_name in list(sys.modules):
         if "cl_gaussians" in mod_name:
             del sys.modules[mod_name]
 
 
 # ---------------------------------------------------------------------------
-# Bug 1: train.py — CLSplatsTrainer instantiated with wrong number of args
+# Bug 1 FIX: train.py — CLSplatsTrainer now called with (cfg, scene)
 # ---------------------------------------------------------------------------
-class TestBug01_TrainConstructorMismatch:
-    """train.py calls CLSplatsTrainer(cfg) but __init__ expects (cfg, scene)."""
+class TestBug01_TrainConstructorFixed:
+    """train.py now passes both cfg and scene to CLSplatsTrainer."""
 
     def test_trainer_init_requires_scene(self):
-        """Verify CLSplatsTrainer.__init__ requires a 'scene' parameter."""
         source = (CLSPLATS_DIR / "trainer.py").read_text()
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "__init__":
-                # Check parent class is CLSplatsTrainer
                 parent = None
                 for parent_node in ast.walk(tree):
                     if isinstance(parent_node, ast.ClassDef):
@@ -76,13 +70,12 @@ class TestBug01_TrainConstructorMismatch:
                     )
                     break
 
-    def test_train_py_missing_scene_arg(self):
-        """Verify train.py does NOT pass a scene argument to CLSplatsTrainer."""
+    def test_train_py_passes_scene_arg(self):
+        """Verify train.py passes 2 args (cfg, scene) to CLSplatsTrainer."""
         source = (CLSPLATS_DIR / "train.py").read_text()
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
-                # Find CLSplatsTrainer(...) or trainer.CLSplatsTrainer(...)
                 call_name = ""
                 if isinstance(node.func, ast.Attribute):
                     call_name = node.func.attr
@@ -90,115 +83,86 @@ class TestBug01_TrainConstructorMismatch:
                     call_name = node.func.id
                 if call_name == "CLSplatsTrainer":
                     n_args = len(node.args) + len(node.keywords)
-                    assert n_args == 1, (
-                        f"BUG CONFIRMED: CLSplatsTrainer called with {n_args} "
-                        f"arg(s) but needs 2 (cfg, scene)"
+                    assert n_args == 2, (
+                        f"CLSplatsTrainer should be called with 2 args, got {n_args}"
                     )
                     return
         pytest.skip("CLSplatsTrainer call not found in train.py")
 
 
 # ---------------------------------------------------------------------------
-# Bug 2: depth_anything_lifter.py — Broken depth buffer parsing
+# Bug 2 FIX: depth_anything_lifter.py — Correct depth parsing
 # ---------------------------------------------------------------------------
-class TestBug02_BrokenDepthParsing:
-    """torch.from_numpy is called on a torch.Tensor, not numpy array."""
+class TestBug02_DepthParsingFixed:
+    """Depth parsing now correctly converts PIL Image → numpy → tensor."""
 
-    def test_from_numpy_on_tensor_raises(self):
-        """torch.from_numpy can't accept a torch.Tensor — this is a TypeError."""
-        t = torch.tensor([1.0, 2.0, 3.0])
-        with pytest.raises(TypeError):
-            torch.from_numpy(t)
-
-    def test_depth_estimation_code_pattern_is_wrong(self):
-        """Verify the specific wrong code pattern in the source file."""
+    def test_no_from_numpy_on_tensor(self):
+        """torch.from_numpy should NOT be called on a torch.Tensor."""
         source = (CLSPLATS_DIR / "lifter" / "depth_anything_lifter.py").read_text()
-        # The bug: torch.from_numpy wraps a torch.ByteTensor
-        assert "torch.from_numpy" in source, "torch.from_numpy call should exist"
-        assert "torch.ByteTensor" in source, "torch.ByteTensor call should exist"
-        # Verify they're nested (from_numpy wrapping ByteTensor)
-        assert "torch.from_numpy(\n" in source or "torch.from_numpy(" in source
+        # The buggy pattern (torch.from_numpy wrapping ByteTensor) should be gone
+        assert "torch.ByteTensor" not in source, "ByteTensor pattern removed"
+
+    def test_uses_np_array_conversion(self):
+        """Verify depth parsing uses np.array() for proper conversion."""
+        source = (CLSPLATS_DIR / "lifter" / "depth_anything_lifter.py").read_text()
+        assert "np.array(depth_output" in source or "np.array(" in source, (
+            "Should use np.array for depth conversion"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Bug 3: dinov2_detector.py — Missing ImageNet normalization
+# Bug 3 FIX: dinov2_detector.py — ImageNet normalisation now applied
 # ---------------------------------------------------------------------------
-class TestBug03_MissingNormalization:
-    """self.normalize is defined but never applied to images."""
+class TestBug03_NormalizationFixed:
+    """self.normalize is now applied inside _preprocess_image."""
 
-    def test_normalize_defined_but_not_used_in_preprocess(self):
-        """Verify _preprocess_image does NOT call self.normalize."""
+    def test_normalize_used_in_preprocess(self):
         source = (CLSPLATS_DIR / "change_detection" / "dinov2_detector.py").read_text()
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "_preprocess_image":
-                # Check method body for any call to self.normalize
                 method_source = ast.get_source_segment(source, node)
-                assert "self.normalize" not in method_source, (
-                    "self.normalize found in _preprocess_image — bug might be fixed"
+                assert method_source is not None
+                assert "self.normalize" in method_source, (
+                    "_preprocess_image should call self.normalize"
                 )
                 return
         pytest.fail("_preprocess_image method not found")
 
-    def test_normalize_not_in_predict_change_mask(self):
-        """Also verify normalize isn't called in predict_change_mask."""
-        source = (CLSPLATS_DIR / "change_detection" / "dinov2_detector.py").read_text()
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "predict_change_mask":
-                method_source = ast.get_source_segment(source, node)
-                assert "self.normalize" not in method_source, (
-                    "self.normalize found in predict_change_mask — bug might be fixed"
-                )
-                return
-        pytest.fail("predict_change_mask method not found")
-
 
 # ---------------------------------------------------------------------------
-# Bug 4: depth_anything_lifter.py — Extra .unsqueeze(-1) in homogeneous div
+# Bug 4 FIX: depth_anything_lifter.py — Correct homogeneous division
 # ---------------------------------------------------------------------------
-class TestBug04_IncorrectHomogeneousDivision:
-    """Extra .unsqueeze(-1) on [M,1] tensor causes shape mismatch."""
+class TestBug04_HomogeneousDivisionFixed:
+    """The buggy .unsqueeze(-1) is removed from homogeneous division."""
 
-    def test_unsqueeze_on_already_broadcastable_shape(self):
-        """Demonstrate the math error: [M,3] / [M,1,1] fails or gives wrong shape."""
+    def test_correct_homogeneous_division(self):
+        """[M, 3] / [M, 1] should give [M, 3]."""
         M = 10
         p_world_h = torch.randn(M, 4)
-        # Correct: [M, 3] / [M, 1] works via broadcasting
+        p_world_h[:, 3] = 1.0
         correct = p_world_h[..., :3] / p_world_h[..., 3:]
         assert correct.shape == (M, 3)
 
-        # Bug: [M, 3] / [M, 1, 1] adds dimension
-        buggy_divisor = p_world_h[..., 3:].unsqueeze(-1)
-        assert buggy_divisor.shape == (M, 1, 1), (
-            f"Extra unsqueeze creates wrong shape: {buggy_divisor.shape}"
-        )
-        # This would broadcast to (M, 3, 1) instead of (M, 3)
-        result = p_world_h[..., :3] / buggy_divisor
-        assert result.shape != (M, 3), (
-            f"BUG CONFIRMED: result shape is {result.shape}, not (M, 3)"
-        )
-
-    def test_source_contains_buggy_pattern(self):
-        """Verify the buggy .unsqueeze(-1) pattern exists in the source."""
+    def test_source_no_buggy_unsqueeze(self):
+        """Verify the buggy .unsqueeze(-1) pattern is removed."""
         source = (CLSPLATS_DIR / "lifter" / "depth_anything_lifter.py").read_text()
-        assert "3:].unsqueeze(-1)" in source, (
-            "Expected buggy .unsqueeze(-1) pattern in depth_anything_lifter.py"
-        )
+        assert "3:].unsqueeze(-1)" not in source, "Buggy .unsqueeze(-1) pattern should be removed"
 
 
 # ---------------------------------------------------------------------------
-# Bug 5: cl_gaussians.py — Optimizer not updated after pruning
+# Bug 5 FIX: cl_gaussians.py — Optimizer rebuilt after pruning
 # ---------------------------------------------------------------------------
-class TestBug05_OptimizerNotUpdatedAfterPruning:
-    """After prune_gaussians, optimizer still references old tensors."""
+class TestBug05_OptimizerUpdatedAfterPruning:
+    """After prune_gaussians, optimizer references the new tensors."""
 
-    def test_prune_does_not_update_optimizer(self):
-        """Verify optimizer param groups still point to old tensors after pruning."""
+    def test_optimizer_updated_after_prune(self):
         _mock_gsplat()
-
-        cfg = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
-
+        from clsplats.config import CLSplatsConfig
+        from typing import cast
+        cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
+        base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
+        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
         from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 
         N = 20
@@ -210,176 +174,146 @@ class TestBug05_OptimizerNotUpdatedAfterPruning:
             opacity=torch.full((N, 1), 0.5),
         )
         params.quats[:, 0] = 1.0
-
         gauss = CLGaussians(cfg, params)
 
-        # Grab optimizer's param reference before pruning
         old_positions_id = id(gauss.optimizer.param_groups[0]["params"][0])
 
-        # Prune half the gaussians
         prune_mask = torch.zeros(N, dtype=torch.bool)
-        prune_mask[:N // 2] = True
+        prune_mask[: N // 2] = True
         gauss.prune_gaussians(prune_mask)
 
-        # After pruning, params should have changed
         assert gauss.params.positions.shape[0] == N // 2
-
-        # BUG: optimizer still references the OLD tensor
+        # FIX: optimizer now references the NEW tensor
         new_positions_id = id(gauss.optimizer.param_groups[0]["params"][0])
-        assert old_positions_id == new_positions_id, (
-            "BUG CONFIRMED: optimizer params were NOT updated after pruning"
+        assert old_positions_id != new_positions_id, (
+            "Optimizer params should be updated after pruning"
         )
 
+    def test_step_after_prune_succeeds(self):
+        """After pruning, optimizer.step() should still work correctly."""
+        _mock_gsplat()
+        from clsplats.config import CLSplatsConfig
+        from typing import cast
+        cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
+        base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
+        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
+        from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
+
+        N = 20
+        params = GaussianParams(
+            positions=torch.randn(N, 3),
+            scales=torch.full((N, 3), 0.01),
+            quats=torch.zeros(N, 4),
+            sh_features=torch.zeros(N, 3, 1),
+            opacity=torch.full((N, 1), 0.5),
+        )
+        params.quats[:, 0] = 1.0
+        gauss = CLGaussians(cfg, params)
+
+        # Step once to populate state
+        loss = gauss.params.positions.sum()
+        loss.backward()
+        gauss.step_optimizer()
+
+        # Prune
+        prune_mask = torch.zeros(N, dtype=torch.bool)
+        prune_mask[:10] = True
+        gauss.prune_gaussians(prune_mask)
+
+        # Another backward + step should NOT raise
+        loss2 = gauss.params.positions.sum()
+        loss2.backward()
+        gauss.step_optimizer()
+        assert gauss.params.positions.shape == (10, 3)
+
 
 # ---------------------------------------------------------------------------
-# Bug 6: dinov2_detector.py — Double-indexed DINOv2 features
+# Bug 6 FIX: dinov2_detector.py — No double indexing
 # ---------------------------------------------------------------------------
-class TestBug06_DoubleIndexedFeatures:
-    """rendered_feats is already unbatched, [0] indexes channels not batch."""
+class TestBug06_NoDoubleIndexing:
+    """Features are used directly instead of feats[0]."""
 
-    def test_source_double_indexes_features(self):
-        """Verify the double-indexing pattern exists in the source."""
+    def test_source_no_double_indexing(self):
         source = (CLSPLATS_DIR / "change_detection" / "dinov2_detector.py").read_text()
-        # The line should have: cos_sim = self.cos(rendered_feats[0], observed_feats[0])
-        assert "rendered_feats[0]" in source, "Double indexing pattern found"
-        assert "observed_feats[0]" in source, "Double indexing pattern found"
-
-    def test_cosine_sim_wrong_dims_after_double_indexing(self):
-        """Show that double-indexing changes shape semantics."""
-        # Simulate get_intermediate_layers returning tuple of (B, C, H, W)
-        B, C, H, W = 1, 768, 16, 16
-        # After (feats,) = ... unpacking, feats is [B, C, H, W]
-        feats = torch.randn(B, C, H, W)
-
-        # Correct: use feats directly (dim=1 means channel dim)
-        cos = torch.nn.CosineSimilarity(dim=1)
-        correct_sim = cos(feats, feats)
-        assert correct_sim.shape == (B, H, W), f"Correct shape: {correct_sim.shape}"
-
-        # Buggy: feats[0] gives [C, H, W], cosine on dim=1 compares H
-        buggy_sim = cos(feats[0], feats[0])
-        assert buggy_sim.shape == (C, W), (
-            f"BUG CONFIRMED: double indexing gives shape {buggy_sim.shape} "
-            f"instead of ({B}, {H}, {W})"
-        )
+        assert "rendered_feats[0]" not in source, "Double indexing should be removed"
+        assert "observed_feats[0]" not in source, "Double indexing should be removed"
 
 
 # ---------------------------------------------------------------------------
-# Bug 7: cameras.py — Twc recomputed on every access
+# Bug 7 FIX: cameras.py — Twc cached in __init__
 # ---------------------------------------------------------------------------
-class TestBug07_TwcNotCached:
-    """Twc property calls torch.inverse every time it's accessed."""
+class TestBug07_TwcCached:
+    """Twc is now cached at init time, not recomputed on every access."""
 
-    def test_twc_is_property_not_cached(self):
-        """Verify Twc is a simple property, not cached at __init__ time."""
+    def test_twc_cached_in_init(self):
         source = (CLSPLATS_DIR / "dataset" / "cameras.py").read_text()
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name == "Camera":
-                # Check __init__ doesn't precompute self.Twc
                 for method in node.body:
                     if isinstance(method, ast.FunctionDef) and method.name == "__init__":
                         init_source = ast.get_source_segment(source, method)
-                        assert "Twc" not in init_source or "self.Twc" not in init_source, (
-                            "Twc is NOT cached in __init__ (bug)"
-                        )
-                # Check Twc is defined as a @property with torch.inverse
-                for method in node.body:
-                    if isinstance(method, ast.FunctionDef) and method.name == "Twc":
-                        method_source = ast.get_source_segment(source, method)
-                        assert "torch.inverse" in method_source, (
-                            "Twc calls torch.inverse every access"
-                        )
+                        assert init_source is not None
+                        assert "_Twc" in init_source, "Twc should be cached as _Twc in __init__"
                         return
-        pytest.fail("Camera.Twc not found")
+        pytest.fail("Camera.__init__ not found")
 
 
 # ---------------------------------------------------------------------------
-# Bug 8: train.py — Wrong Hydra config path
+# Bug 8 FIX: train.py — Correct Hydra config path
 # ---------------------------------------------------------------------------
-class TestBug08_WrongHydraConfigPath:
-    """config_path='configs' is relative to train.py inside clsplats/, not project root."""
+class TestBug08_CorrectHydraConfigPath:
+    """config_path is now '../configs' relative to clsplats/train.py."""
 
-    def test_config_path_relative_mismatch(self):
-        """Verify that configs/ is NOT inside clsplats/ where train.py lives."""
-        train_py_dir = CLSPLATS_DIR
-        config_from_decorator = train_py_dir / "configs"
-        project_configs = PROJECT_ROOT / "configs"
+    def test_config_path_correct(self):
+        source = (CLSPLATS_DIR / "train.py").read_text()
+        assert "../configs" in source, "config_path should be '../configs'"
 
-        assert not config_from_decorator.is_dir(), (
-            f"clsplats/configs/ should NOT exist — the real configs are at {project_configs}"
-        )
-        assert project_configs.is_dir(), "configs/ should exist at project root"
-
-    def test_all_config_files_are_empty(self):
-        """Verify that config yaml files are empty (another bug)."""
-        config_dir = PROJECT_ROOT / "configs"
-        yaml_files = list(config_dir.rglob("*.yaml"))
-        assert len(yaml_files) > 0, "Should have yaml config files"
-        for yf in yaml_files:
-            content = yf.read_text().strip()
-            assert content == "", f"Config file {yf.name} is empty (no config defined)"
+    def test_config_file_not_empty(self):
+        """cl-splats.yaml should now have content."""
+        config_file = PROJECT_ROOT / "configs" / "cl-splats.yaml"
+        assert config_file.exists()
+        content = config_file.read_text().strip()
+        assert len(content) > 10, "Config file should have meaningful content"
 
 
 # ---------------------------------------------------------------------------
-# Bug 9: train.py — Wrong import (bare 'import trainer')
+# Bug 9 FIX: train.py — Package-qualified import
 # ---------------------------------------------------------------------------
-class TestBug09_WrongImport:
-    """train.py uses 'import trainer' instead of 'from clsplats import trainer'."""
+class TestBug09_CorrectImport:
+    """train.py now uses package-qualified imports."""
 
-    def test_bare_import_trainer(self):
-        """Verify train.py uses a bare 'import trainer' without package prefix."""
+    def test_no_bare_import_trainer(self):
         source = (CLSPLATS_DIR / "train.py").read_text()
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "trainer":
-                        # This is the bare import — BUG
-                        assert True, "BUG CONFIRMED: bare 'import trainer'"
-                        return
-        pytest.skip("No bare 'import trainer' found — may be fixed")
+                    assert alias.name != "trainer", "Bare 'import trainer' should be fixed"
 
 
 # ---------------------------------------------------------------------------
-# Bug 10: depth_anything_lifter.py — pos_conf/neg_conf computed but unused
+# Bug 10 FIX: depth_anything_lifter.py — No dangling confidence vars
 # ---------------------------------------------------------------------------
-class TestBug10_UnusedConfidenceVars:
-    """pos_conf and neg_conf are computed but never used."""
+class TestBug10_NoUnusedConfidenceVars:
+    """pos_conf and neg_conf are no longer in the source."""
 
-    def test_pos_neg_conf_unused(self):
-        """Verify pos_conf and neg_conf are assigned but not read."""
+    def test_no_pos_neg_conf(self):
         source = (CLSPLATS_DIR / "lifter" / "depth_anything_lifter.py").read_text()
-        # Check they're assigned
-        assert "pos_conf =" in source, "pos_conf should be assigned"
-        assert "neg_conf =" in source, "neg_conf should be assigned"
-
-        # Check they're never used after assignment (no reads beyond assignment)
-        lines = source.split("\n")
-        pos_conf_uses = [
-            (i, l) for i, l in enumerate(lines)
-            if "pos_conf" in l and "pos_conf =" not in l and "#" not in l.split("pos_conf")[0]
-        ]
-        neg_conf_uses = [
-            (i, l) for i, l in enumerate(lines)
-            if "neg_conf" in l and "neg_conf =" not in l and "#" not in l.split("neg_conf")[0]
-        ]
-        assert len(pos_conf_uses) == 0, f"pos_conf is never read after assignment"
-        assert len(neg_conf_uses) == 0, f"neg_conf is never read after assignment"
+        assert "pos_conf" not in source, "pos_conf should be removed"
+        assert "neg_conf" not in source, "neg_conf should be removed"
 
 
 # ---------------------------------------------------------------------------
-# Bug 11: BaseLifter.lift() signature doesn't match DepthAnythingLifter.lift()
+# Bug 11 FIX: BaseLifter.lift() signature now matches
 # ---------------------------------------------------------------------------
-class TestBug11_LifterSignatureMismatch:
-    """Abstract method signature differs from concrete implementation."""
+class TestBug11_LifterSignatureMatches:
+    """Abstract method signature now matches concrete implementation."""
 
-    def test_base_vs_concrete_lift_signatures(self):
-        """Verify the parameter mismatch between base and sub class."""
+    def test_base_matches_concrete_signature(self):
         base_source = (CLSPLATS_DIR / "lifter" / "base_lifter.py").read_text()
         concrete_source = (CLSPLATS_DIR / "lifter" / "depth_anything_lifter.py").read_text()
 
-        # Extract lift method signatures via AST
         def get_lift_params(source):
             tree = ast.parse(source)
             for node in ast.walk(tree):
@@ -392,140 +326,147 @@ class TestBug11_LifterSignatureMismatch:
 
         assert base_params is not None, "BaseLifter.lift should exist"
         assert concrete_params is not None, "DepthAnythingLifter.lift should exist"
-        assert base_params != concrete_params, (
-            f"BUG CONFIRMED: base params {base_params} != concrete params {concrete_params}"
+        assert base_params == concrete_params, (
+            f"Signatures should match: base={base_params}, concrete={concrete_params}"
         )
 
 
 # ---------------------------------------------------------------------------
-# Bug 12 & 13: dataset_reader.py & cameras.py — Wrong import paths
+# Bug 12 & 13 FIX: Correct import paths
 # ---------------------------------------------------------------------------
-class TestBug12_DatasetReaderWrongImports:
-    """dataset_reader.py imports from 'scene.' and 'utils.' instead of 'clsplats.'"""
+class TestBug12_DatasetReaderCorrectImports:
+    """dataset_reader.py now uses clsplats-qualified imports."""
 
-    def test_imports_reference_original_repo(self):
-        """Verify the broken import paths exist in dataset_reader.py."""
+    def test_no_legacy_imports(self):
         source = (CLSPLATS_DIR / "dataset" / "dataset_reader.py").read_text()
-        # These imports won't resolve unless the original gaussian-splatting repo is on path
-        assert "from scene.colmap_loader import" in source, (
-            "BUG: imports from 'scene.colmap_loader' instead of 'clsplats.dataset.colmap_reader'"
-        )
-        assert "from utils.graphics_utils import" in source, (
-            "BUG: imports from 'utils.graphics_utils' instead of 'clsplats.utils.graphics_utils'"
-        )
-        assert "from utils.sh_utils import" in source, (
-            "BUG: imports from 'utils.sh_utils' instead of 'clsplats.utils.sh_utils'"
-        )
-
-    def test_dataset_reader_cannot_be_imported(self):
-        """Verify dataset_reader.py fails to import in a clean environment."""
-        sys.path.insert(0, str(PROJECT_ROOT))
-        with pytest.raises((ImportError, ModuleNotFoundError)):
-            # This should fail because 'scene.colmap_loader' doesn't exist
-            import importlib
-            importlib.import_module("clsplats.dataset.dataset_reader")
+        assert "from scene.colmap_loader import" not in source, "Legacy import path should be fixed"
+        assert (
+            "from clsplats.dataset.colmap_reader" in source
+            or "from clsplats.utils.graphics_utils" in source
+        ), "Should use clsplats-qualified imports"
 
 
-class TestBug13_CamerasWrongImports:
-    """cameras.py imports from 'utils.' instead of 'clsplats.utils.'"""
+class TestBug13_CamerasCorrectImports:
+    """cameras.py now uses clsplats-qualified imports."""
 
-    def test_imports_reference_original_repo(self):
-        """Verify the broken import paths exist in cameras.py."""
+    def test_no_legacy_imports(self):
         source = (CLSPLATS_DIR / "dataset" / "cameras.py").read_text()
-        assert "from utils.graphics_utils import" in source, (
-            "BUG: imports from 'utils.graphics_utils'"
-        )
-        assert "from utils.general_utils import" in source, (
-            "BUG: imports from 'utils.general_utils'"
-        )
-
-    def test_cameras_cannot_be_imported(self):
-        """Verify cameras.py fails to import in a clean environment."""
-        sys.path.insert(0, str(PROJECT_ROOT))
-        with pytest.raises((ImportError, ModuleNotFoundError)):
-            import importlib
-            importlib.import_module("clsplats.dataset.cameras")
-
-
-# ---------------------------------------------------------------------------
-# Bug 14: gaussian_model.py — Silent no-op feature indexing
-# ---------------------------------------------------------------------------
-class TestBug14_SilentNoOpFeatureIndexing:
-    """features[:, 3:, 1:] = 0.0 is a no-op when dim 1 has size 3."""
-
-    def test_noop_slice(self):
-        """Demonstrate that [:, 3:, 1:] selects nothing on a (N, 3, K) tensor."""
-        N, C, K = 100, 3, 4
-        features = torch.ones(N, C, K)
-        # This should do nothing — it selects features[:, 3:, :] = empty
-        subset = features[:, 3:, 1:]
-        assert subset.numel() == 0, (
-            f"BUG CONFIRMED: features[:, 3:, 1:] selects {subset.numel()} elements "
-            f"(shape {subset.shape}) — it's a no-op"
-        )
-
-    def test_source_contains_noop_pattern(self):
-        """Verify the no-op indexing pattern exists in gaussian_model.py."""
-        source = (CLSPLATS_DIR / "representation" / "gaussian_model.py").read_text()
-        assert "features[:, 3:, 1:]" in source, (
-            "The no-op indexing pattern should exist in gaussian_model.py"
+        assert "from utils.graphics_utils import" not in source, "Legacy import should be fixed"
+        assert "from clsplats.utils.graphics_utils" in source, (
+            "Should use clsplats-qualified imports"
         )
 
 
 # ---------------------------------------------------------------------------
-# Bug 15: Multiple files — Bare except clauses
+# Bug 14: gaussian_model.py — File is now deleted
 # ---------------------------------------------------------------------------
-class TestBug15_BareExceptClauses:
-    """Multiple files use bare 'except:' that swallow all exceptions."""
+class TestBug14_GaussianModelDeleted:
+    """gaussian_model.py (with the no-op indexing) is now deleted."""
 
-    @pytest.mark.parametrize("filepath,expected_min_count", [
-        ("representation/gaussian_model.py", 2),
-        ("dataset/dataset_reader.py", 2),
-    ])
-    def test_bare_except_clauses(self, filepath, expected_min_count):
-        """Count bare except clauses in source files."""
-        source = (CLSPLATS_DIR / filepath).read_text()
+    def test_file_deleted(self):
+        assert not (CLSPLATS_DIR / "representation" / "gaussian_model.py").exists(), (
+            "gaussian_model.py should be deleted"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug 15 FIX: No bare except clauses in dataset_reader.py
+# ---------------------------------------------------------------------------
+class TestBug15_NoBareExceptClauses:
+    """dataset_reader.py no longer uses bare 'except:' clauses."""
+
+    def test_no_bare_except_in_dataset_reader(self):
+        source = (CLSPLATS_DIR / "dataset" / "dataset_reader.py").read_text()
         tree = ast.parse(source)
-        bare_except_count = 0
+        count = 0
         for node in ast.walk(tree):
             if isinstance(node, ast.ExceptHandler):
-                if node.type is None:  # bare except:
-                    bare_except_count += 1
-        assert bare_except_count >= expected_min_count, (
-            f"Expected at least {expected_min_count} bare except clauses in {filepath}, "
-            f"found {bare_except_count}"
-        )
+                if node.type is None:
+                    count += 1
+        assert count == 0, f"Found {count} bare except clauses, expected 0"
+
+    def test_no_bare_except_in_cameras(self):
+        source = (CLSPLATS_DIR / "dataset" / "cameras.py").read_text()
+        tree = ast.parse(source)
+        count = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                if node.type is None:
+                    count += 1
+        assert count == 0, f"Found {count} bare except clauses, expected 0"
 
 
 # ---------------------------------------------------------------------------
-# Bug 16: run_test_scene.py — Hardcoded macOS path
+# Bug 16 FIX: run_test_scene.py — No hardcoded macOS path
 # ---------------------------------------------------------------------------
-class TestBug16_HardcodedPath:
-    """run_test_scene.py hardcodes a local macOS path."""
+class TestBug16_NoHardcodedPath:
+    """run_test_scene.py no longer contains hardcoded macOS path."""
 
-    def test_hardcoded_macos_path(self):
-        """Verify the hardcoded /Users/jan path exists."""
+    def test_no_hardcoded_macos_path(self):
         source = (PROJECT_ROOT / "scripts" / "run_test_scene.py").read_text()
-        assert "/Users/jan/Code/" in source, (
-            "BUG CONFIRMED: Hardcoded macOS path in run_test_scene.py"
-        )
+        assert "/Users/jan/Code/" not in source, "Hardcoded macOS path should be removed"
 
 
 # ---------------------------------------------------------------------------
-# Integration: Verify core cl_gaussians module works (dependency-free)
+# Quality: structured config exists and is importable
+# ---------------------------------------------------------------------------
+class TestConfigModule:
+    """Test that the new config module is well-formed."""
+
+    def test_config_importable(self):
+        from clsplats.config import CLSplatsConfig
+
+        cfg = CLSplatsConfig()
+        assert cfg.model.sh_degree == 0
+        assert cfg.train.lr == 1e-3
+        assert cfg.lifter.k_nn == 8
+
+    def test_all_fields_have_defaults(self):
+        from clsplats.config import CLSplatsConfig
+
+        cfg = CLSplatsConfig()
+        # Every sub-config should instantiate without arguments
+        assert cfg.model is not None
+        assert cfg.train is not None
+        assert cfg.change is not None
+        assert cfg.lifter is not None
+        assert cfg.constraints is not None
+        assert cfg.history is not None
+
+
+# ---------------------------------------------------------------------------
+# Quality: dead code is removed
+# ---------------------------------------------------------------------------
+class TestDeadCodeRemoved:
+    """Verify unused modules are deleted."""
+
+    def test_gaussian_model_deleted(self):
+        assert not (CLSPLATS_DIR / "representation" / "gaussian_model.py").exists()
+
+    def test_sampling_deleted(self):
+        assert not (CLSPLATS_DIR / "sampling").exists()
+
+    def test_pyproject_exists(self):
+        assert (PROJECT_ROOT / "pyproject.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# Integration: CLGaussians with mocked gsplat
 # ---------------------------------------------------------------------------
 class TestCLGaussiansIntegration:
-    """Integration test for CLGaussians — the main gsplat-free module."""
+    """Integration tests for CLGaussians."""
 
     def setup_method(self):
-        """Mock gsplat before each test."""
         _mock_gsplat()
 
     def _make_gaussians(self, n=50):
-        """Create a simple CLGaussians instance."""
         from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 
-        cfg = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
+        from clsplats.config import CLSplatsConfig
+        from typing import cast
+        cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
+        base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
+        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
         params = GaussianParams(
             positions=torch.randn(n, 3),
             scales=torch.full((n, 3), 0.01),
@@ -543,70 +484,53 @@ class TestCLGaussiansIntegration:
 
     def test_optimizer_step(self):
         gauss = self._make_gaussians(10)
-        # Simulate backward + step
         loss = gauss.params.positions.sum()
         loss.backward()
         gauss.step_optimizer()
-        # Grads should be zeroed
         assert gauss.params.positions.grad is None
 
     def test_prune_basic(self):
         gauss = self._make_gaussians(20)
         prune_mask = torch.zeros(20, dtype=torch.bool)
-        prune_mask[::2] = True  # prune every other
+        prune_mask[::2] = True
         keep = gauss.prune_gaussians(prune_mask)
         assert gauss.params.positions.shape[0] == 10
         assert keep.sum().item() == 10
 
-    def test_prune_then_step_has_stale_optimizer_state(self):
-        """BUG 5 demo: after pruning, optimizer state buffers have wrong shape."""
+    def test_prune_then_step_works(self):
+        """After pruning, optimizer step should succeed with no shape mismatch."""
         gauss = self._make_gaussians(20)
-        # First do a step to populate optimizer state (exp_avg, exp_avg_sq)
         loss = gauss.params.positions.sum()
         loss.backward()
         gauss.step_optimizer()
 
-        # Grab optimizer state shape BEFORE pruning
-        state = gauss.optimizer.state[gauss.optimizer.param_groups[0]["params"][0]]
-        pre_prune_shape = state["exp_avg"].shape
-        assert pre_prune_shape == (20, 3)
-
-        # Now prune to 10 gaussians
         prune_mask = torch.zeros(20, dtype=torch.bool)
         prune_mask[:10] = True
         gauss.prune_gaussians(prune_mask)
-
-        # Params are now (10, 3)
         assert gauss.params.positions.shape == (10, 3)
 
-        # BUG: optimizer state still has old shape (20, 3) or points to stale tensor
-        # The optimizer's param_groups[0]["params"][0] still references the old tensor
+        # After pruning, step should work correctly
+        loss2 = gauss.params.positions.sum()
+        loss2.backward()
+        gauss.step_optimizer()
+        assert gauss.params.positions.shape == (10, 3)
+
+        # Optimizer state (if any) should match current shape
         opt_param = gauss.optimizer.param_groups[0]["params"][0]
         if opt_param in gauss.optimizer.state:
-            stale_state = gauss.optimizer.state[opt_param]
-            stale_shape = stale_state["exp_avg"].shape
-            assert stale_shape != gauss.params.positions.shape, (
-                f"BUG CONFIRMED: optimizer exp_avg shape {stale_shape} != "
-                f"params shape {gauss.params.positions.shape}"
-            )
-        else:
-            # Optimizer references old tensor that is no longer gauss.params.positions
-            assert opt_param is not gauss.params.positions, (
-                "BUG CONFIRMED: optimizer still references old pre-prune tensor"
-            )
+            state = gauss.optimizer.state[opt_param]
+            assert state["exp_avg"].shape == gauss.params.positions.shape
 
 
 # ---------------------------------------------------------------------------
-# Test the primitives module (fully self-contained, no broken imports)
+# Primitives module
 # ---------------------------------------------------------------------------
 class TestPrimitivesModule:
-    """Test the constraints/primitives module for correctness."""
-
-    def setup_method(self):
-        sys.path.insert(0, str(PROJECT_ROOT))
+    """Test the constraints/primitives module."""
 
     def test_fit_sphere(self):
         from clsplats.constraints.primitives import fit_sphere
+
         pts = torch.randn(100, 3) * 0.5
         sphere = fit_sphere(pts)
         assert sphere.center.shape == (3,)
@@ -614,8 +538,9 @@ class TestPrimitivesModule:
 
     def test_fit_obb(self):
         from clsplats.constraints.primitives import fit_obb
+
         pts = torch.randn(100, 3)
-        pts[:, 0] *= 5  # Make anisotropic
+        pts[:, 0] *= 5
         obb = fit_obb(pts)
         assert obb.center.shape == (3,)
         assert obb.half_extents.shape == (3,)
@@ -623,28 +548,30 @@ class TestPrimitivesModule:
 
     def test_sphere_distance_inside(self):
         from clsplats.constraints.primitives import distance_to_primitive
+
         prim = ("sphere", type("S", (), {"center": torch.zeros(3), "radius": 2.0})())
-        # Point inside sphere should have distance 0
         pts = torch.tensor([[0.0, 0.0, 0.0]])
-        d = distance_to_primitive(pts, prim)
+        d = distance_to_primitive(pts, prim)  # type: ignore
         assert d.item() == pytest.approx(0.0, abs=1e-6)
 
     def test_sphere_distance_outside(self):
         from clsplats.constraints.primitives import distance_to_primitive
+
         prim = ("sphere", type("S", (), {"center": torch.zeros(3), "radius": 1.0})())
         pts = torch.tensor([[3.0, 0.0, 0.0]])
-        d = distance_to_primitive(pts, prim)
+        d = distance_to_primitive(pts, prim)  # type: ignore
         assert d.item() == pytest.approx(2.0, abs=1e-6)
 
     def test_union_distance_empty(self):
         from clsplats.constraints.primitives import union_distance
+
         pts = torch.randn(10, 3)
         d = union_distance(pts, [])
         assert (d == 0).all()
 
     def test_group_active_gaussians(self):
         from clsplats.constraints.primitives import group_active_gaussians
-        # Two well-separated clusters
+
         pts = torch.zeros(20, 3)
         pts[:10] = torch.randn(10, 3) * 0.01
         pts[10:] = torch.randn(10, 3) * 0.01 + 10.0

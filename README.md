@@ -76,11 +76,23 @@ path/to/your/input/
 
 
 ### Running CL-Splats
-As of now, the modules were reimplemented using gsplat. While they can be run, I yet have to verify that they work.
+You can run CL-Splats using our intuitive CLI `cl-splats-train`. Start by training your initial scene representation:
 
-> **Note:**  
-> Please refer to [Todos](#todos) to see the progress of releases.
+```bash
+cl-splats-train --data-path <path/to/dataset>
+```
 
+You can view all available CLI options using the `--help` flag:
+```bash
+cl-splats-train --help
+```
+
+Our pipeline natively exports standard `.ply` formats after training. The resulting point clouds are saved automatically to the training output directory (by default `outputs/`), allowing them to be imported directly into standard viewers like SuperSplat.
+
+You can also override any configuration value using Hydra overrides:
+```bash
+cl-splats-train --data-path <path/to/dataset> optimization.lr=0.01
+```
 
 ## Todos
 I continue to release the missing modules required to replicate our method.
@@ -92,7 +104,7 @@ I continue to release the missing modules required to replicate our method.
 - [x] Release pruning module.
 - [x] Release data.
 - [x] ~~Release local-optimization CUDA kernels.~~
-- [ ] Verify codebase.
+- [x] Verify codebase.
 - [ ] Release history recovery.
 
 ## Citation

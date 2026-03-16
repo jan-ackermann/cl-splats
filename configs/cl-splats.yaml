@@ -1,0 +1,48 @@
+# CL-Splats default configuration.
+# See clsplats/config.py for field documentation.
+
+model:
+  sh_degree: 0
+  init_scale: 0.01
+  init_opacity: 0.5
+
+train:
+  lr: 1e-3
+  iters_per_timestep: 100
+  log_interval: 10
+  num_times: 1
+  start_time: 0
+
+change:
+  threshold: 0.8
+  dilate_mask: false
+  dilate_kernel_size: 31
+  upsample: true
+
+lifter:
+  depth_model: "depth-anything/Depth-Anything-V2-Small-hf"
+  k_nn: 8
+  local_radius_thresh: 2.5
+  depth_tol_abs: 0.05
+  depth_tol_rel: 0.05
+  lambda_seed: 2.0
+  lambda_neg: 0.25
+  min_visible_views: 2
+  min_positive_views: 2
+  min_seed_views: 1
+  min_positive_ratio: 0.3
+  final_thresh: 0.6
+
+constraints:
+  group_radius_frac: 0.1
+  lambda_bound: 0.0
+  prune_every: 50
+  prune_dist_thresh: 0.02
+  prune_consecutive: 3
+
+history:
+  log_history: false
+
+wandb_project: "cl-splats"
+wandb_run_name: ""
+wandb_mode: "online"

@@ -1,0 +1,17 @@
+{
+  "include": ["clsplats", "scripts", "tests"],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__"
+  ],
+  "strictListInference": true,
+  "strictDictionaryInference": true,
+  "strictSetInference": true,
+  "reportMissingTypeStubs": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownMemberType": false,
+  "reportMissingImports": "warning",
+  "pythonVersion": "3.10"
+}
