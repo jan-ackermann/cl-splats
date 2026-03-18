@@ -27,21 +27,17 @@ flags.mark_flags_as_required(['output_path'])
 
 
 def main(_):
-    # Use offline mode — /tmp is always writable in the container
-    os.environ['WANDB_MODE'] = 'offline'
+    # /tmp is always writable; put wandb run data there regardless of mode.
     os.environ['WANDB_DIR'] = '/tmp'
-    # Force HuggingFace and torch.hub to use cached models — no internet on XCloud
-    os.environ['HF_HUB_OFFLINE'] = '1'
-    os.environ['TRANSFORMERS_OFFLINE'] = '1'
-    os.environ['HF_HOME'] = '/workdir/hf_cache'
-    os.environ['TORCH_HOME'] = '/workdir/torch_cache'
 
     # Prepare command — data_path is the base scene root (e.g. Level-1).
     # train.py handles appending change_type internally for t > start_time.
+    # --offline tells train.py to set HF/torch cache env vars and disable wandb sync.
     cmd_parts = [
         'cl-splats-train',
         f'--data-path {_DATA_PATH.value}',
         f'--change-type {_CHANGE_TYPE.value}',
+        '--offline',
     ]
 
     cmd = ' \\\n    '.join(cmd_parts)
@@ -53,7 +49,7 @@ def main(_):
         logging.error('Command failed with exit code %d', exit_code)
         raise RuntimeError(f'Command failed with exit code {exit_code}')
 
-    # Copy offline wandb logs to GCS (fallback, in case of partial offline runs)
+    # Copy offline wandb logs to GCS output path
     logging.info('Copying wandb logs to GCS output path...')
     os.system(f'gsutil -m cp -r /tmp/wandb/* {_OUTPUT_PATH.value}/wandb/ || true')
 

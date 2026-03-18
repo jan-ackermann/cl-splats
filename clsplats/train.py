@@ -67,6 +67,15 @@ def main(
         "-c",
         help="Change type for Blender CL datasets (e.g., add, delete, move, multi).",
     ),
+    offline: bool = typer.Option(
+        False,
+        "--offline/--no-offline",
+        help=(
+            "Run in fully offline mode (no internet). "
+            "Sets HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, and forces wandb offline. "
+            "Use --offline on XCloud; omit (or --no-offline) for local dev."
+        ),
+    ),
     config_name: str = typer.Option(
         "cl-splats", help="Name of the Hydra configuration file to use."
     ),
@@ -75,6 +84,16 @@ def main(
     ),
 ) -> None:
     """Launch the CL-Splats training pipeline."""
+    if offline:
+        # Must be set before any HuggingFace / torch.hub imports resolve.
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("HF_HOME", "/workdir/hf_cache")
+        os.environ.setdefault("TORCH_HOME", "/workdir/torch_cache")
+        os.environ.setdefault("WANDB_MODE", "offline")
+        logger.info("Offline mode enabled — using cached models only.")
+    else:
+        logger.info("Online mode — models and W&B will use network as needed.")
     GlobalHydra.instance().clear()
     with hydra.initialize(version_base=None, config_path="../configs"):
         cfg_overrides = []
