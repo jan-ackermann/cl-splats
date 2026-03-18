@@ -49,9 +49,10 @@ def main(_):
         logging.error('Command failed with exit code %d', exit_code)
         raise RuntimeError(f'Command failed with exit code {exit_code}')
 
-    # Copy offline wandb logs to GCS output path
+    # Sync offline wandb logs to GCS output path.
+    # Use rsync (not cp -r with glob) to avoid "multiple source" gsutil errors.
     logging.info('Copying wandb logs to GCS output path...')
-    os.system(f'gsutil -m cp -r /tmp/wandb/* {_OUTPUT_PATH.value}/wandb/ || true')
+    os.system(f'gsutil -m rsync -r /tmp/wandb/ {_OUTPUT_PATH.value}/wandb/ || true')
 
 
 if __name__ == '__main__':
