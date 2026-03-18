@@ -175,7 +175,20 @@ Results are saved to `outputs/<run-name>/` by default and include:
 
 - `gaussians_t<N>.ply` — Gaussian splat checkpoint at each trained timestep,  
   viewable in [SuperSplat](https://superspl.at/editor) or Luma AI
+- `eval/t<N>/` — per-view rendered + GT images and console PSNR/SSIM when `--eval` is used
 - W&B run logs (synced live, or stored offline for later upload)
+
+### Evaluating on a Test Split
+
+Pass `--eval` to hold out a test set (every 8th camera LLFF-style for COLMAP; `transforms_test.json` for Blender) and compute **PSNR** and **SSIM** after training each timestep:
+
+```bash
+cl-splats-train --data-path path/to/dataset --eval
+```
+
+Per-view metrics are printed to stdout and (if W&B is active) logged under `eval/t<timestep>/psnr` and `eval/t<timestep>/ssim`. Rendered images are saved to `outputs/eval/t<N>/`.
+
+The evaluation uses **torchmetrics** when installed (`pip install 'torchmetrics[image]'`) and falls back to a pure-PyTorch SSIM/PSNR implementation otherwise.
 
 
 ## Configuration

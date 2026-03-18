@@ -159,6 +159,9 @@ def main(
     # Keep the config in sync so trainer.prepare_timestep's assert passes.
     omegaconf.OmegaConf.update(cfg, "train.num_times", num_times, merge=False)
 
+    # Track the last loaded scene so we can pass its test cameras to evaluate().
+    active_scene = scene
+
     for time in range(cfg.train.start_time, num_times):
         # For Blender temporal data: load the change-scene at t1
         if fmt == "Blender" and time > cfg.train.start_time and change_type:
@@ -175,10 +178,17 @@ def main(
                 eval=cfg.eval,
             )
             trainer.update_cameras(change_scene, time)
+            active_scene = change_scene
 
         logger.info("Optimizing observations at time {time}.", time=time)
         trainer.prepare_timestep(time)
         trainer.train()
+
+        if cfg.eval and active_scene.test_cameras:
+            trainer.evaluate(
+                test_cameras=active_scene.test_cameras,
+                timestep=time,
+            )
 
         if cfg.history.log_history:
             trainer.log_history()

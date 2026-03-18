@@ -27,6 +27,7 @@ train = [
     "wandb",
     "loguru",
     "transformers",
+    "torchmetrics[image]",
 ]
 gsplat = [
     "gsplat",

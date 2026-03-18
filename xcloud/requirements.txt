@@ -12,4 +12,5 @@ typer
 wandb
 loguru
 transformers
+torchmetrics[image]
 gsplat

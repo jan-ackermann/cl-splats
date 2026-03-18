@@ -5,9 +5,11 @@ detect → lift → constrain → optimise → prune.
 """
 
 from collections import defaultdict
+from pathlib import Path
 from typing import List
 
 import torch
+import torch.nn.functional as F
 from gsplat.rendering import rasterization
 from loguru import logger
 from PIL import Image as PILImage
@@ -20,6 +22,50 @@ from clsplats.dataset.dataset_reader import SceneInfo
 from clsplats.lifter.depth_anything_lifter import DepthAnythingLifter
 from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 from clsplats.utils.custom_types import Image
+
+
+# ---------------------------------------------------------------------------
+# Metric helpers (used when torchmetrics is not installed)
+# ---------------------------------------------------------------------------
+
+def _manual_psnr(pred: torch.Tensor, gt: torch.Tensor, max_val: float = 1.0) -> torch.Tensor:
+    """Peak Signal-to-Noise Ratio for [B, C, H, W] tensors in [0, max_val]."""
+    mse = F.mse_loss(pred, gt)
+    return 10.0 * torch.log10(torch.tensor(max_val**2) / mse.clamp(min=1e-10))
+
+
+def _manual_ssim(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    window_size: int = 11,
+    sigma: float = 1.5,
+    max_val: float = 1.0,
+) -> torch.Tensor:
+    """Structural Similarity Index for [B, C, H, W] tensors.
+
+    A lightweight single-scale implementation without multi-scale weighting.
+    """
+    B, C, H, W = pred.shape
+    K1, K2 = 0.01, 0.03
+    C1, C2 = (K1 * max_val) ** 2, (K2 * max_val) ** 2
+
+    # Gaussian kernel
+    coords = torch.arange(window_size, dtype=pred.dtype, device=pred.device)
+    coords -= window_size // 2
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    kernel = g.outer(g)[None, None].repeat(C, 1, 1, 1)  # [C, 1, k, k]
+    pad = window_size // 2
+
+    mu_x = F.conv2d(pred, kernel, padding=pad, groups=C)
+    mu_y = F.conv2d(gt, kernel, padding=pad, groups=C)
+    sigma_xx = F.conv2d(pred * pred, kernel, padding=pad, groups=C) - mu_x**2
+    sigma_yy = F.conv2d(gt * gt, kernel, padding=pad, groups=C) - mu_y**2
+    sigma_xy = F.conv2d(pred * gt, kernel, padding=pad, groups=C) - mu_x * mu_y
+
+    ssim_map = (2 * mu_x * mu_y + C1) * (2 * sigma_xy + C2)
+    ssim_map /= (mu_x**2 + mu_y**2 + C1) * (sigma_xx + sigma_yy + C2)
+    return ssim_map.mean()
 
 
 class CLSplatsTrainer:
@@ -329,6 +375,153 @@ class CLSplatsTrainer:
                     num_iters=num_iters,
                     loss=stats["loss"],
                 )
+
+    # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate(
+        self,
+        test_cameras: List["CameraInfo"],  # CameraInfo from dataset_reader
+        timestep: int,
+        out_dir: str | Path = "outputs/eval",
+    ) -> dict:
+        """Render *test_cameras* and compute image-quality metrics.
+
+        Computes per-image **PSNR** and **SSIM** (via torchmetrics when
+        available, with a manual fallback) and saves rendered / ground-truth
+        images to *out_dir*.  Summary metrics are logged to W&B if a run is
+        active.
+
+        Args:
+            test_cameras: Held-out cameras (``CameraInfo`` namedtuples from the
+                dataset reader).  They carry ``image_path`` for ground truth.
+            timestep: Which training timestep is being evaluated (for logging).
+            out_dir: Directory to save rendered images.
+
+        Returns:
+            Dict with keys ``"psnr"`` and ``"ssim"`` (mean values over all
+            test cameras).
+        """
+        out_dir = Path(out_dir) / f"t{timestep:04d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Try to import torchmetrics; fall back to manual implementations.
+        try:
+            from torchmetrics.image import (
+                PeakSignalNoiseRatio,
+                StructuralSimilarityIndexMeasure,
+            )
+            psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
+            ssim_metric = StructuralSimilarityIndexMeasure(
+                data_range=1.0
+            ).to(self.device)
+            use_torchmetrics = True
+        except ImportError:
+            logger.warning(
+                "torchmetrics not installed — using manual PSNR/SSIM fallbacks."
+            )
+            use_torchmetrics = False
+
+        psnr_values: list[float] = []
+        ssim_values: list[float] = []
+
+        self.gaussians.params.positions.requires_grad_(False)  # inference only
+
+        for cam_info in test_cameras:
+            # Build a Camera object from the CameraInfo namedtuple.
+            img_pil = PILImage.open(cam_info.image_path).convert("RGB")
+            cam = Camera(
+                resolution=(cam_info.width, cam_info.height),
+                colmap_id=cam_info.uid,
+                R=cam_info.R,
+                T=cam_info.T,
+                FoVx=cam_info.FovX,
+                FoVy=cam_info.FovY,
+                depth_params=cam_info.depth_params,
+                image=img_pil,
+                invdepthmap=None,
+                image_name=cam_info.image_name,
+                uid=cam_info.uid,
+                data_device="cpu",
+                train_test_exp=False,
+                is_test_dataset=True,
+                is_test_view=True,
+                timestep=cam_info.timestep,
+            )
+
+            with torch.no_grad():
+                rendered = self._render_camera(cam)  # [H, W, 3] in [0, 1]
+
+            gt = cam.original_image.permute(1, 2, 0).to(self.device)  # [H, W, 3]
+
+            # torchmetrics expects [B, C, H, W]
+            pred_bchw = rendered.permute(2, 0, 1).unsqueeze(0).clamp(0, 1)
+            gt_bchw = gt.permute(2, 0, 1).unsqueeze(0).clamp(0, 1)
+
+            if use_torchmetrics:
+                psnr = float(psnr_metric(pred_bchw, gt_bchw))
+                ssim = float(ssim_metric(pred_bchw, gt_bchw))
+            else:
+                psnr = float(_manual_psnr(pred_bchw, gt_bchw))
+                ssim = float(_manual_ssim(pred_bchw, gt_bchw))
+
+            psnr_values.append(psnr)
+            ssim_values.append(ssim)
+
+            logger.info(
+                "[eval t={t}] {name}: PSNR={psnr:.2f} dB  SSIM={ssim:.4f}",
+                t=timestep,
+                name=cam_info.image_name,
+                psnr=psnr,
+                ssim=ssim,
+            )
+
+            # Save rendered and ground-truth images
+            rendered_np = (
+                rendered.detach().cpu().clamp(0, 1).numpy() * 255
+            ).astype("uint8")
+            gt_np = (gt.detach().cpu().clamp(0, 1).numpy() * 255).astype("uint8")
+            PILImage.fromarray(rendered_np).save(
+                out_dir / f"{cam_info.image_name}_render.png"
+            )
+            PILImage.fromarray(gt_np).save(
+                out_dir / f"{cam_info.image_name}_gt.png"
+            )
+
+        mean_psnr = float(sum(psnr_values) / len(psnr_values)) if psnr_values else 0.0
+        mean_ssim = float(sum(ssim_values) / len(ssim_values)) if ssim_values else 0.0
+
+        logger.info(
+            "[eval t={t}] Mean PSNR={psnr:.2f} dB  Mean SSIM={ssim:.4f}  "
+            "({n} views)  → {dir}",
+            t=timestep,
+            psnr=mean_psnr,
+            ssim=mean_ssim,
+            n=len(psnr_values),
+            dir=out_dir,
+        )
+
+        # W&B logging
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({
+                    f"eval/t{timestep}/psnr": mean_psnr,
+                    f"eval/t{timestep}/ssim": mean_ssim,
+                })
+                # Log a grid of up to 8 renders
+                panels = []
+                for cam_info in test_cameras[:8]:
+                    rpath = out_dir / f"{cam_info.image_name}_render.png"
+                    if rpath.exists():
+                        panels.append(wandb.Image(str(rpath), caption=cam_info.image_name))
+                if panels:
+                    wandb.log({f"eval/t{timestep}/renders": panels})
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        return {"psnr": mean_psnr, "ssim": mean_ssim}
 
     def log_history(self) -> None:
         """Export Gaussians and log metrics."""
