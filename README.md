@@ -190,6 +190,38 @@ Per-view metrics are printed to stdout and (if W&B is active) logged under `eval
 
 The evaluation uses **torchmetrics** when installed (`pip install 'torchmetrics[image]'`) and falls back to a pure-PyTorch SSIM/PSNR implementation otherwise.
 
+### Standalone Evaluation (`cl-splats-eval`)
+
+To evaluate a previously saved `.ply` checkpoint **without re-running training**, use the dedicated `cl-splats-eval` command:
+
+```bash
+# Evaluate a checkpoint on its dataset test split
+cl-splats-eval \
+    --ply outputs/gaussians_time_0001.ply \
+    --data-path path/to/dataset
+
+# Blender CL scene — evaluate at t=1 (change timestep)
+cl-splats-eval \
+    --ply outputs/gaussians_time_0001.ply \
+    --data-path path/to/Level-1 \
+    --change-type add \
+    --timestep 1
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ply` / `-p` | *(required)* | Path to the `.ply` Gaussian checkpoint |
+| `--data-path` / `-d` | *(required)* | Dataset root directory |
+| `--change-type` / `-c` | `None` | Change type for Blender CL datasets |
+| `--timestep` / `-t` | `0` | Timestep the checkpoint corresponds to (for output naming) |
+| `--out-dir` / `-o` | `outputs/eval` | Where to save rendered + GT images |
+| `--images` | `images` | Images sub-folder (COLMAP only) |
+| `--sh-degree` | `0` | SH degree used during training |
+
+Rendered images are saved as `<out_dir>/t<N>/<name>_render.png` and `<name>_gt.png`. Metrics are printed to stdout.
+
 
 ## Configuration
 
