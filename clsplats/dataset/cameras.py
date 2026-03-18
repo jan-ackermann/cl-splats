@@ -51,6 +51,7 @@ class Camera(nn.Module):
         train_test_exp=False,
         is_test_dataset=False,
         is_test_view=False,
+        timestep=0,
     ):
         super().__init__()
 
@@ -61,6 +62,7 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.timestep = timestep
 
         try:
             self.data_device = torch.device(data_device)

@@ -45,4 +45,11 @@ history:
 
 wandb_project: "cl-splats"
 wandb_run_name: ""
-wandb_mode: "online"
+wandb_mode: "offline"
+
+# Dataset paths (overridden at runtime via CLI)
+data_path: "."
+images: "images"
+depths: ""
+eval: false
+train_test_exp: false

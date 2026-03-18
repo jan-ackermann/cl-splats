@@ -1,0 +1,15 @@
+torch>=2.0
+torchvision
+numpy>=1.24
+scipy>=1.11.0
+
+omegaconf
+hydra-core
+Pillow
+plyfile
+opencv-python-headless
+typer
+wandb
+loguru
+transformers
+gsplat

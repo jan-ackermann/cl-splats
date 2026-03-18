@@ -18,7 +18,9 @@ class DinoV2Detector(base_detector.BaseDetector):
     def __init__(self, cfg: ChangeDetectionConfig):
         super().__init__(cfg)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+        self.model = torch.hub.load(
+            "facebookresearch/dinov2", "dinov2_vitb14", trust_repo=True
+        )
         self.model.eval()  # type: ignore
         self.model.to(self.device)  # type: ignore
         self.cos = torch.nn.CosineSimilarity(dim=1)
@@ -76,8 +78,10 @@ class DinoV2Detector(base_detector.BaseDetector):
             (observed_feats,) = self.model.get_intermediate_layers(observed, reshape=True)  # type: ignore
             # DINOv2 returns (B, C, H, W) — use the batch directly, not [0]
             # (Bug 6 fix: removed double-indexing)
-            cos_sim = self.cos(rendered_feats, observed_feats)  # (H, W)
+            cos_sim = self.cos(rendered_feats, observed_feats)  # (1, H, W) — batch dim preserved
+            cos_sim = cos_sim.squeeze(0)  # (H, W)
             mask = cos_sim < self.cfg.threshold
+
 
         if self.cfg.dilate_mask:
             mask = self._dilate_mask(mask, kernel_size=self.cfg.dilate_kernel_size)

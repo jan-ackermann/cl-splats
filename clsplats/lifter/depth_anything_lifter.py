@@ -99,6 +99,12 @@ class DepthAnythingLifter(BaseLifter):
             pos_pixels = (mask > 0.5) & torch.isfinite(depth) & (depth > 0)
             if pos_pixels.any():
                 ys, xs = torch.nonzero(pos_pixels, as_tuple=True)
+                # Sub-sample to avoid OOM in the kNN distance matrix (M×N).
+                max_pos = min(ys.numel(), 2048)
+                if ys.numel() > max_pos:
+                    perm = torch.randperm(ys.numel(), device=device)[:max_pos]
+                    ys = ys[perm]
+                    xs = xs[perm]
                 d = depth[ys, xs]
 
                 # Back-project to camera coordinates
@@ -110,12 +116,12 @@ class DepthAnythingLifter(BaseLifter):
                 p_cam = torch.stack([x_cam, y_cam, z_cam, ones], dim=-1)  # [M, 4]
                 Twc = cam.Twc.to(device)  # [4, 4]
                 p_world_h = p_cam @ Twc.T  # [M, 4]
-                # Bug 4 fix: removed incorrect .unsqueeze(-1)
-                p_world = p_world_h[..., :3] / p_world_h[..., 3:]
+                p_world = p_world_h[..., :3] / p_world_h[..., 3:]  # [M, 3]
 
-                # Brute-force kNN in Gaussian means
-                dists = torch.cdist(p_world, means)
+                # kNN in Gaussian means — cap M so cdist stays in memory
+                dists = torch.cdist(p_world, means)  # [M, N]
                 knn_dists, knn_idx = torch.topk(dists, k=min(self.k_nn, N), dim=-1, largest=False)
+                del dists  # free immediately
 
                 # Local scale-aware distance
                 local_scales = scales[knn_idx]  # [M, k, 3]
@@ -124,19 +130,17 @@ class DepthAnythingLifter(BaseLifter):
 
                 valid = d_local < self.local_radius_thresh  # [M, k]
                 if valid.any():
-                    # Depth consistency: project means to camera space
-                    means_h = torch.cat(
-                        [
-                            means[None].expand(p_world.shape[0], -1, -1),
-                            torch.ones(p_world.shape[0], N, 1, device=device),
-                        ],
-                        dim=-1,
-                    )  # [M, N, 4]
-                    Tcw = torch.inverse(Twc)[None]  # [1, 4, 4]
-                    means_cam = means_h @ Tcw.transpose(1, 2)  # [M, N, 4]
-                    z_means = means_cam[..., 2]  # [M, N]
+                    # Depth consistency: project only the k neighbour means (not all N)
+                    # into camera space — (M, k, 4) instead of (M, N, 4).
+                    Tcw = torch.inverse(Twc)  # [4, 4]
+                    knn_means = means[knn_idx]  # [M, k, 3]
+                    M, k = knn_means.shape[:2]
+                    knn_means_h = torch.cat(
+                        [knn_means, torch.ones(M, k, 1, device=device)], dim=-1
+                    )  # [M, k, 4]
+                    knn_cam = knn_means_h @ Tcw.T  # [M, k, 4]
+                    z_knn = knn_cam[..., 2]  # [M, k]
 
-                    z_knn = torch.gather(z_means, 1, knn_idx)  # [M, k]
                     depth_pix = d.unsqueeze(-1)  # [M, 1]
                     depth_ok = (z_knn - depth_pix).abs() < (
                         self.depth_tol_abs + self.depth_tol_rel * depth_pix

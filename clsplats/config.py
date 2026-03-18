@@ -97,4 +97,4 @@ class CLSplatsConfig:
     # Wandb integration
     wandb_project: str = "cl-splats"
     wandb_run_name: str = ""
-    wandb_mode: str = "online"
+    wandb_mode: str = "offline"

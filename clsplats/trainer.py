@@ -4,6 +4,7 @@ Orchestrates the full continual-learning Gaussian Splatting pipeline:
 detect → lift → constrain → optimise → prune.
 """
 
+from collections import defaultdict
 from typing import List
 
 import torch
@@ -83,11 +84,48 @@ class CLSplatsTrainer:
                 train_test_exp=False,
                 is_test_dataset=False,
                 is_test_view=cam_info.is_test,
+                timestep=cam_info.timestep,
             )
             self.train_cameras.append(cam)
 
+        # Group cameras by timestep for temporal data
+        self._cameras_by_timestep: dict[int, list] = defaultdict(list)
+        for cam in self.train_cameras:
+            self._cameras_by_timestep[cam.timestep].append(cam)
+
         self.detector = DinoV2Detector(cfg.change)
         self.lifter = DepthAnythingLifter(cfg)
+
+    def update_cameras(self, scene: SceneInfo, timestep: int) -> None:
+        """Load new cameras from *scene* for the given *timestep*.
+
+        Used for the Blender/NeRF-Synthetic temporal workflow where each
+        timestep lives in a separate directory.
+        """
+        new_cameras: list[Camera] = []
+        for uid, cam_info in enumerate(scene.train_cameras):
+            img = PILImage.open(cam_info.image_path)
+            resolution = (cam_info.width, cam_info.height)
+            cam = Camera(
+                resolution=resolution,
+                colmap_id=cam_info.uid,
+                R=cam_info.R,
+                T=cam_info.T,
+                FoVx=cam_info.FovX,
+                FoVy=cam_info.FovY,
+                depth_params=cam_info.depth_params,
+                image=img,
+                invdepthmap=None,
+                image_name=cam_info.image_name,
+                uid=uid,
+                data_device="cpu",
+                train_test_exp=False,
+                is_test_dataset=False,
+                is_test_view=cam_info.is_test,
+                timestep=timestep,
+            )
+            new_cameras.append(cam)
+        self._cameras_by_timestep[timestep] = new_cameras
 
     def prepare_timestep(self, timestep: int) -> None:
         """Set up the trainer for optimising at the given *timestep*.
@@ -98,6 +136,10 @@ class CLSplatsTrainer:
         """
         assert timestep < self.cfg.train.num_times, "timestep >= num_times"
         self.timestep = timestep
+
+        # Select cameras for this timestep (if temporal data is available)
+        if timestep in self._cameras_by_timestep:
+            self.train_cameras = self._cameras_by_timestep[timestep]
 
         if len(self.train_cameras) == 0:
             self.active_mask = None
@@ -115,7 +157,7 @@ class CLSplatsTrainer:
         change_masks = []
         for cam in self.train_cameras:
             rendered = self._render_camera(cam)
-            gt = cam.original_image.permute(1, 2, 0).contiguous()
+            gt = cam.original_image.permute(1, 2, 0).contiguous().to(self.device)
             with torch.no_grad():
                 change_mask_2d = self.detector.predict_change_mask(
                     rendered_image=rendered,
@@ -194,7 +236,7 @@ class CLSplatsTrainer:
             Dictionary with ``"loss"`` key.
         """
         rendered = self._render_camera(cam)
-        gt = cam.original_image.permute(1, 2, 0).contiguous()
+        gt = cam.original_image.permute(1, 2, 0).contiguous().to(self.device)
 
         photometric_loss = (rendered - gt).pow(2).mean()
 

@@ -13,6 +13,7 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -56,6 +57,7 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     is_test: bool
+    timestep: int = 0
 
 
 class SceneInfo(NamedTuple):
@@ -136,6 +138,9 @@ def readColmapCameras(
 
         image_path = os.path.join(images_folder, extr.name)
         image_name = extr.name
+
+        _ts_match = re.match(r"day_(\d+)_", image_name)
+        timestep = int(_ts_match.group(1)) if _ts_match else 0
         depth_path = (
             os.path.join(depths_folder, f"{extr.name[:-n_remove]}.png")
             if depths_folder != ""
@@ -155,6 +160,7 @@ def readColmapCameras(
             width=width,
             height=height,
             is_test=image_name in test_cam_names_list,
+            timestep=timestep,
         )
         cam_infos.append(cam_info)
 
@@ -303,7 +309,10 @@ def readCamerasFromTransforms(
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
-            cam_name = os.path.join(path, frame["file_path"] + extension)
+            file_path = frame["file_path"]
+            if not os.path.splitext(file_path)[1]:
+                file_path += extension
+            cam_name = os.path.join(path, file_path)
 
             c2w = np.array(frame["transform_matrix"])
             c2w[:3, 1:3] *= -1
@@ -312,7 +321,7 @@ def readCamerasFromTransforms(
             R = np.transpose(w2c[:3, :3])
             T = w2c[:3, 3]
 
-            image_path = os.path.join(path, cam_name)
+            image_path = cam_name
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
@@ -321,7 +330,7 @@ def readCamerasFromTransforms(
 
             norm_data = im_data / 255.0
             arr = norm_data[:, :, :3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
-            image = Image.fromarray(np.array(arr * 255.0, dtype=np.byte), "RGB")
+            image = Image.fromarray(np.array(arr * 255.0, dtype=np.uint8), "RGB")
 
             fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
             FovY = fovy
@@ -358,10 +367,15 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
     train_cam_infos = readCamerasFromTransforms(
         path, "transforms_train.json", depths_folder, white_background, False, extension
     )
-    logger.info("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(
-        path, "transforms_test.json", depths_folder, white_background, True, extension
-    )
+    test_transforms = os.path.join(path, "transforms_test.json")
+    if os.path.exists(test_transforms):
+        logger.info("Reading Test Transforms")
+        test_cam_infos = readCamerasFromTransforms(
+            path, "transforms_test.json", depths_folder, white_background, True, extension
+        )
+    else:
+        logger.info("No transforms_test.json found, skipping test set.")
+        test_cam_infos = []
 
     if not eval:
         train_cam_infos.extend(test_cam_infos)
