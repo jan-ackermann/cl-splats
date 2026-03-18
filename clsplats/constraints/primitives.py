@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import torch
 
@@ -12,12 +12,12 @@ class SpherePrimitive:
 
 @dataclass
 class OBBPrimitive:
-    center: torch.Tensor      # (3,)
-    rotation: torch.Tensor    # (3, 3)
+    center: torch.Tensor  # (3,)
+    rotation: torch.Tensor  # (3, 3)
     half_extents: torch.Tensor  # (3,)
 
 
-Primitive = Tuple[str, object]
+Primitive = Tuple[str, Union[SpherePrimitive, OBBPrimitive]]
 
 
 def _robust_center(points: torch.Tensor) -> torch.Tensor:
@@ -25,14 +25,21 @@ def _robust_center(points: torch.Tensor) -> torch.Tensor:
     return points.mean(dim=0)
 
 
-def fit_sphere(points: torch.Tensor, quantile: float = 0.95, margin: float = 0.02) -> SpherePrimitive:
+def fit_sphere(
+    points: torch.Tensor, quantile: float = 0.95, margin: float = 0.02
+) -> SpherePrimitive:
     center = _robust_center(points)
     dists = torch.norm(points - center[None, :], dim=-1)
     r = torch.quantile(dists, quantile).item() + margin
     return SpherePrimitive(center=center.detach(), radius=r)
 
 
-def fit_obb(points: torch.Tensor, quantile_low: float = 0.05, quantile_high: float = 0.95, margin: float = 0.02) -> OBBPrimitive:
+def fit_obb(
+    points: torch.Tensor,
+    quantile_low: float = 0.05,
+    quantile_high: float = 0.95,
+    margin: float = 0.02,
+) -> OBBPrimitive:
     center = _robust_center(points)
     centered = points - center[None, :]
     cov = centered.T @ centered / max(centered.shape[0] - 1, 1)
@@ -46,10 +53,14 @@ def fit_obb(points: torch.Tensor, quantile_low: float = 0.05, quantile_high: flo
     half_extents = 0.5 * (high - low)
     c_box_local = 0.5 * (low + high)
     c_box_world = center + R @ c_box_local
-    return OBBPrimitive(center=c_box_world.detach(), rotation=R.detach(), half_extents=half_extents.detach())
+    return OBBPrimitive(
+        center=c_box_world.detach(), rotation=R.detach(), half_extents=half_extents.detach()
+    )
 
 
-def group_active_gaussians(positions: torch.Tensor, active_mask: torch.Tensor, radius_frac: float = 0.1) -> List[torch.Tensor]:
+def group_active_gaussians(
+    positions: torch.Tensor, active_mask: torch.Tensor, radius_frac: float = 0.1
+) -> List[torch.Tensor]:
     """Split active Gaussians into connected components in a kNN-like graph.
 
     Two Gaussians are connected if their distance is below a radius threshold,
@@ -66,30 +77,19 @@ def group_active_gaussians(positions: torch.Tensor, active_mask: torch.Tensor, r
         # All points collapsed; single group
         return [idx]
 
+    from scipy.sparse.csgraph import connected_components
+
     radius = radius_frac * extent.item()
     dists = torch.cdist(pts, pts)  # (M, M)
     adj = dists < radius
 
-    M = pts.shape[0]
-    visited = torch.zeros(M, dtype=torch.bool, device=device)
-    groups: List[torch.Tensor] = []
+    adj_np = adj.cpu().numpy()
+    n_components, labels = connected_components(adj_np, directed=False)
+    labels_th = torch.from_numpy(labels).to(device)
 
-    for i in range(M):
-        if visited[i]:
-            continue
-        # BFS to collect a component
-        queue = [i]
-        component_indices = []
-        visited[i] = True
-        while queue:
-            j = queue.pop()
-            component_indices.append(j)
-            neighbors = torch.nonzero(adj[j], as_tuple=False).squeeze(-1)
-            for n in neighbors.tolist():
-                if not visited[n]:
-                    visited[n] = True
-                    queue.append(n)
-        groups.append(idx[torch.tensor(component_indices, device=device)])
+    groups: List[torch.Tensor] = []
+    for comp in range(n_components):
+        groups.append(idx[labels_th == comp])
 
     return groups
 
@@ -131,13 +131,13 @@ def distance_to_primitive(points: torch.Tensor, primitive: Primitive) -> torch.T
     kind, data = primitive
     if kind == "sphere":
         center = data.center.to(points.device)
-        r = data.radius
+        r = data.radius  # type: ignore
         d = torch.norm(points - center[None, :], dim=-1) - r
         return torch.relu(d)
     elif kind == "obb":
         center = data.center.to(points.device)
-        R = data.rotation.to(points.device)
-        e = data.half_extents.to(points.device)
+        R = data.rotation.to(points.device)  # type: ignore
+        e = data.half_extents.to(points.device)  # type: ignore
         y = (R.T @ (points - center[None, :]).T).T  # (N, 3)
         q = torch.abs(y) - e[None, :]
         q_clamped = torch.relu(q)
@@ -156,4 +156,3 @@ def union_distance(points: torch.Tensor, primitives: List[Primitive]) -> torch.T
         dists.append(d)
     stacked = torch.stack(dists, dim=0)  # (K, N)
     return torch.min(stacked, dim=0).values
-

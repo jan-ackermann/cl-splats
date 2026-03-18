@@ -1,9 +1,10 @@
+import argparse
 import os
 import re
 import subprocess
-from pathlib import Path
-import argparse
 import sys
+from pathlib import Path
+
 
 def check_and_run_colmap(input_dir):
     """
@@ -47,29 +48,50 @@ def check_and_run_colmap(input_dir):
             os.symlink(img.resolve(), target)
 
     # Run feature extraction on t0 images
-    subprocess.run([
-        "colmap", "feature_extractor",
-        "--database_path", str(database_path),
-        "--image_path", str(images_dir),
-        "--ImageReader.single_camera", "1",
-        "--ImageReader.camera_model", "OPENCV",
-    ], check=True)
+    subprocess.run(
+        [
+            "colmap",
+            "feature_extractor",
+            "--database_path",
+            str(database_path),
+            "--image_path",
+            str(images_dir),
+            "--ImageReader.single_camera",
+            "1",
+            "--ImageReader.camera_model",
+            "OPENCV",
+        ],
+        check=True,
+    )
 
     # Run exhaustive matcher on t0 images
-    subprocess.run([
-        "colmap", "exhaustive_matcher",
-        "--database_path", str(database_path),
-    ], check=True)
+    subprocess.run(
+        [
+            "colmap",
+            "exhaustive_matcher",
+            "--database_path",
+            str(database_path),
+        ],
+        check=True,
+    )
 
     # Run mapper on t0 images
     sparse_dir.mkdir(exist_ok=True)
-    subprocess.run([
-        "colmap", "mapper",
-        "--database_path", str(database_path),
-        "--image_path", str(images_dir),
-        "--output_path", str(sparse_dir),
-        "--Mapper.ba_global_function_tolerance", "0.000001"
-    ], check=True)
+    subprocess.run(
+        [
+            "colmap",
+            "mapper",
+            "--database_path",
+            str(database_path),
+            "--image_path",
+            str(images_dir),
+            "--output_path",
+            str(sparse_dir),
+            "--Mapper.ba_global_function_tolerance",
+            "0.000001",
+        ],
+        check=True,
+    )
 
     # Select a single reconstruction to be used downstream.
     recon_dirs = sorted([d for d in sparse_dir.iterdir() if d.is_dir()])
@@ -99,52 +121,94 @@ def check_and_run_colmap(input_dir):
                 os.symlink(img.resolve(), target)
 
         # Run feature extraction for new images only
-        subprocess.run([
-            "colmap", "feature_extractor",
-            "--database_path", str(database_path),
-            "--image_path", str(images_dir),
-            "--ImageReader.single_camera", "1"
-        ], check=True)
+        subprocess.run(
+            [
+                "colmap",
+                "feature_extractor",
+                "--database_path",
+                str(database_path),
+                "--image_path",
+                str(images_dir),
+                "--ImageReader.single_camera",
+                "1",
+            ],
+            check=True,
+        )
 
         # Register new images
-        subprocess.run([
-            "colmap", "image_registrator",
-            "--database_path", str(database_path),
-            "--input_path", str(mapper_output),
-            "--output_path", str(mapper_output)
-        ], check=True)
+        subprocess.run(
+            [
+                "colmap",
+                "image_registrator",
+                "--database_path",
+                str(database_path),
+                "--input_path",
+                str(mapper_output),
+                "--output_path",
+                str(mapper_output),
+            ],
+            check=True,
+        )
 
         # Vocab tree matching (assumes vocab tree is available at default location)
-        subprocess.run([
-            "colmap", "vocab_tree_matcher",
-            "--database_path", str(database_path),
-        ], check=True)
+        subprocess.run(
+            [
+                "colmap",
+                "vocab_tree_matcher",
+                "--database_path",
+                str(database_path),
+            ],
+            check=True,
+        )
 
         # Bundle adjustment
-        subprocess.run([
-            "colmap", "bundle_adjuster",
-            "--input_path", str(mapper_output),
-            "--output_path", str(mapper_output)
-        ], check=True)
-        
+        subprocess.run(
+            [
+                "colmap",
+                "bundle_adjuster",
+                "--input_path",
+                str(mapper_output),
+                "--output_path",
+                str(mapper_output),
+            ],
+            check=True,
+        )
+
     # --- Undistort all images in images_dir using COLMAP's image_undistorter ---
     undistorted_dir = images_dir.parent / "undistorted"
     undistorted_dir.mkdir(exist_ok=True)
     # Find the camera model and parameters from the sparse reconstruction
     # Use COLMAP's image_undistorter tool
-    subprocess.run([
-        "colmap", "image_undistorter",
-        "--image_path", str(images_dir),
-        "--input_path", str(mapper_output),
-        "--output_path", str(undistorted_dir),
-        "--output_type", "COLMAP"
-    ], check=True)
+    subprocess.run(
+        [
+            "colmap",
+            "image_undistorter",
+            "--image_path",
+            str(images_dir),
+            "--input_path",
+            str(mapper_output),
+            "--output_path",
+            str(undistorted_dir),
+            "--output_type",
+            "COLMAP",
+        ],
+        check=True,
+    )
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Check directory structure and run COLMAP on images.")
-    parser.add_argument("--input_dir", type=str, help="Input directory containing t* subfolders with images.", required=True)
+    parser = argparse.ArgumentParser(
+        description="Check directory structure and run COLMAP on images."
+    )
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        required=True,
+        help="Input directory containing t* subfolders with images.",
+    )
     args = parser.parse_args()
     check_and_run_colmap(args.input_dir)
+
 
 if __name__ == "__main__":
     main()

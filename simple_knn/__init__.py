@@ -34,6 +34,5 @@ def distCUDA2(points: Union[torch.Tensor, "torch.cuda.Tensor"]) -> torch.Tensor:
     diag_mask = torch.eye(dists.shape[0], device=dists.device, dtype=torch.bool)
     dists.masked_fill_(diag_mask, float("inf"))
     # Nearest-neighbor squared distance
-    nn_dists2, _ = torch.min(dists ** 2, dim=1)
+    nn_dists2, _ = torch.min(dists**2, dim=1)
     return nn_dists2
-

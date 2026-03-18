@@ -1,13 +1,13 @@
 import abc
 
-import omegaconf
 import torch
 
+from clsplats.config import ChangeDetectionConfig
 from clsplats.utils.custom_types import Image
 
-class BaseDetector(abc.ABC):
 
-    def __init__(self, cfg: omegaconf.DictConfig):
+class BaseDetector(abc.ABC):
+    def __init__(self, cfg: ChangeDetectionConfig):
         self.cfg = cfg
 
     @abc.abstractmethod

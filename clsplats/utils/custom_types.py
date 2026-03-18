@@ -1,4 +1,6 @@
-import torchtyping
+"""Shared type aliases for the CL-Splats codebase."""
+
 import torch
 
-Image = torchtyping.TensorType["H", "W", 3, torch.float32]
+# An image tensor with shape [H, W, 3] in float32, values in [0, 1].
+Image = torch.Tensor
