@@ -22,10 +22,14 @@ _NUM_GPUS = flags.DEFINE_integer('num_gpus', 1, 'Number of A100 GPUs.')
 _DATA_PATH = flags.DEFINE_string(
     'data_path',
     '/gcs/xcloud-shared/janackermann/datasets/cl-splats/Blender-Levels/Level-1',
-    'GCS path to dataset.',
+    'GCS path to dataset. For COLMAP/real-world scenes omit --change_type. '
+    'For Blender CL scenes set --change_type (e.g. add, delete, move).',
 )
 _CHANGE_TYPE = flags.DEFINE_string(
-    'change_type', 'add', 'Change type for Blender dataset.'
+    'change_type',
+    'add',
+    'Change type for Blender CL dataset (e.g. add, delete, move). '
+    'Leave empty for COLMAP/real-world scenes.',
 )
 
 flags.mark_flags_as_required(['output_path'])

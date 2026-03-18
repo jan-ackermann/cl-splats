@@ -36,9 +36,11 @@ def main(_):
     cmd_parts = [
         'cl-splats-train',
         f'--data-path {_DATA_PATH.value}',
-        f'--change-type {_CHANGE_TYPE.value}',
         '--offline',
     ]
+    # --change-type is Blender-only; omit entirely for COLMAP/real-world scenes.
+    if _CHANGE_TYPE.value:
+        cmd_parts.append(f'--change-type {_CHANGE_TYPE.value}')
 
     cmd = ' \\\n    '.join(cmd_parts)
     logging.info('Running command:\n%s', cmd)
