@@ -50,9 +50,12 @@ def main(_):
         raise RuntimeError(f'Command failed with exit code {exit_code}')
 
     # Sync offline wandb logs to GCS output path.
-    # Use rsync (not cp -r with glob) to avoid "multiple source" gsutil errors.
+    # The output path is a GCS FUSE mount (/gcs/...) so the directory must
+    # exist before rsyncing into it.
     logging.info('Copying wandb logs to GCS output path...')
-    os.system(f'gsutil -m rsync -r /tmp/wandb/ {_OUTPUT_PATH.value}/wandb/ || true')
+    wandb_dst = f'{_OUTPUT_PATH.value}/wandb'
+    os.makedirs(wandb_dst, exist_ok=True)
+    os.system(f'gsutil -m rsync -r /tmp/wandb/ {wandb_dst}/ || true')
 
 
 if __name__ == '__main__':
