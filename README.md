@@ -233,7 +233,7 @@ I continue to release the missing modules required to replicate our method.
 - [x] Release pruning module.
 - [x] Release data.
 - [x] ~~Release local-optimization CUDA kernels.~~
-- [x] Verify codebase.
+- [ ] Verify codebase.
 - [ ] Release history recovery.
 
 ## Citation
