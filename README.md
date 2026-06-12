@@ -35,20 +35,46 @@ Please follow the instructions on the COLMAP website to install COLMAP. If possi
 
 ### Environment
 
-We tested our code on Ubuntu 24.04 with CUDA 12.8. Install via pip (we recommend a conda/venv environment):
+We tested our code on Ubuntu 24.04 with CUDA 12.8, and verified the full pipeline on Debian with CUDA 12.4 (A100, torch 2.6.0+cu124, Python 3.13). Install via pip (we recommend a conda/venv environment):
 
 ```bash
 # Create and activate environment
 conda create -n cl-splats python=3.10
 conda activate cl-splats
 
-# Install package and all dependencies
-pip install -e .
+# Install the package with everything needed for training:
+#   [train]  → transformers (Depth-Anything), torchmetrics, wandb
+#   [gsplat] → gsplat rasterizer + ninja (for its CUDA JIT build)
+pip install -e '.[train,gsplat]'
 ```
 
-> **Note:**  
-> Make sure that your installed PyTorch (`torch`) version is compiled with the **same CUDA version** as the one you use to compile the custom CUDA kernels in this project.  
-> Additionally, you must have the **CUDA Development Kit** installed to provide access to required CUDA libraries.
+A bare `pip install -e .` installs only the core dependencies — enough for the unit tests, but **not** for training (`cl-splats-train` needs the `train` and `gsplat` extras).
+
+> **Note — CUDA versions:**
+> Your PyTorch wheel's CUDA version must be supported by your **NVIDIA driver**, and `nvcc` (CUDA Development Kit) must be on `PATH` with a matching version — gsplat compiles its CUDA kernels with `nvcc` on first use (one-time, ~2 min; it also needs `ninja`, installed by the `gsplat` extra). For example, on a CUDA 12.4 driver install a cu124 wheel:
+>
+> ```bash
+> pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+> ```
+>
+> A wheel built for a newer CUDA than the driver supports (e.g. cu13x on a 12.4 driver) makes `torch.cuda.is_available()` return `False`.
+
+## Data
+
+The synthetic continual-learning benchmark (Blender Levels 1–3 with `add`/`delete`/`move`/`multi` changes) and the real-world scenes are hosted on HuggingFace at [`ackermannj/cl-splats-dataset`](https://huggingface.co/datasets/ackermannj/cl-splats-dataset):
+
+```bash
+# Example: download the Level-1 base scene + 'add' change (skips .blend/checkpoint files)
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('ackermannj/cl-splats-dataset', repo_type='dataset', local_dir='data',
+                  allow_patterns=['Blender-Levels/Level-1/transforms_train.json',
+                                  'Blender-Levels/Level-1/train/**',
+                                  'Blender-Levels/Level-1/add/**'])
+"
+
+cl-splats-train --data-path data/Blender-Levels/Level-1 --change-type add --eval --white-background
+```
 
 
 ## Dataset Format

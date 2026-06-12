@@ -32,6 +32,8 @@ train = [
 ]
 gsplat = [
     "gsplat",
+    # gsplat JIT-compiles its CUDA kernels on first use; the build needs ninja.
+    "ninja",
 ]
 dev = [
     "pytest>=7.0",
