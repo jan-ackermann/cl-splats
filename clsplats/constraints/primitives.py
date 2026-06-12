@@ -59,17 +59,27 @@ def fit_obb(
 
 
 def group_active_gaussians(
-    positions: torch.Tensor, active_mask: torch.Tensor, radius_frac: float = 0.1
+    positions: torch.Tensor,
+    active_mask: torch.Tensor,
+    radius_frac: float = 0.1,
+    max_points: int = 4096,
 ) -> List[torch.Tensor]:
     """Split active Gaussians into connected components in a kNN-like graph.
 
     Two Gaussians are connected if their distance is below a radius threshold,
     chosen as radius_frac times the scene extent.
+
+    The pairwise distance matrix is O(M²), so large active sets are grouped
+    on a uniform subsample of at most ``max_points`` — the groups are only
+    used to fit bounding primitives, for which a subsample is equivalent.
     """
     device = positions.device
     idx = torch.nonzero(active_mask, as_tuple=False).squeeze(-1)
     if idx.numel() == 0:
         return []
+    if idx.numel() > max_points:
+        sel = torch.randperm(idx.numel(), device=device)[:max_points]
+        idx = idx[sel]
 
     pts = positions[idx]  # (M, 3)
     extent = torch.norm(pts.max(dim=0).values - pts.min(dim=0).values)
