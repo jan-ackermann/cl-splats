@@ -30,7 +30,7 @@ def _mock_gsplat():
     if "gsplat" not in sys.modules:
         mock_gsplat = types.ModuleType("gsplat")
         mock_gsplat.Strategy = type("Strategy", (), {})  # type: ignore
-        mock_gsplat.DefaultStrategy = type("DefaultStrategy", (), {})  # type: ignore
+        mock_gsplat.DefaultStrategy = _MockDefaultStrategy  # type: ignore
         sys.modules["gsplat"] = mock_gsplat
     if "gsplat.rendering" not in sys.modules:
         mock_rendering = types.ModuleType("gsplat.rendering")
@@ -44,6 +44,24 @@ def _mock_gsplat():
     for mod_name in list(sys.modules):
         if "cl_gaussians" in mod_name:
             del sys.modules[mod_name]
+
+
+class _MockDefaultStrategy:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def check_sanity(self, params, optimizers):
+        assert set(params.keys()) == set(optimizers.keys())
+
+    def initialize_state(self, scene_scale=1.0):
+        return {"scene_scale": scene_scale}
+
+    def step_pre_backward(self, *args, **kwargs):
+        return None
+
+    def step_post_backward(self, *args, **kwargs):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +176,9 @@ class TestBug05_OptimizerUpdatedAfterPruning:
 
     def test_optimizer_updated_after_prune(self):
         _mock_gsplat()
-        from clsplats.config import CLSplatsConfig
         from typing import cast
+
+        from clsplats.config import CLSplatsConfig
         cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
         base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
         cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
@@ -192,8 +211,9 @@ class TestBug05_OptimizerUpdatedAfterPruning:
     def test_step_after_prune_succeeds(self):
         """After pruning, optimizer.step() should still work correctly."""
         _mock_gsplat()
-        from clsplats.config import CLSplatsConfig
         from typing import cast
+
+        from clsplats.config import CLSplatsConfig
         cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
         base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
         cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
@@ -460,10 +480,10 @@ class TestCLGaussiansIntegration:
         _mock_gsplat()
 
     def _make_gaussians(self, n=50):
-        from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
+        from typing import cast
 
         from clsplats.config import CLSplatsConfig
-        from typing import cast
+        from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
         cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
         base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
         cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
