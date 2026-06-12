@@ -61,6 +61,11 @@ def main(
     images: str = typer.Option("images", help="Name of the images subdirectory."),
     depths: str = typer.Option("", help="Name of the depths subdirectory (optional)."),
     eval_split: bool = typer.Option(False, "--eval", help="Whether to evaluate on a test split."),
+    white_background: bool = typer.Option(
+        False,
+        "--white-background/--black-background",
+        help="Composite and render Blender scenes onto a white background.",
+    ),
     change_type: Optional[str] = typer.Option(
         None,
         "--change-type",
@@ -105,6 +110,8 @@ def main(
             cfg_overrides.append(f"depths={depths}")
         if eval_split:
             cfg_overrides.append("eval=True")
+        if white_background:
+            cfg_overrides.append("white_background=True")
 
         if isinstance(overrides, list) and overrides:
             cfg_overrides.extend(overrides)
@@ -126,7 +133,7 @@ def main(
     if fmt == "Blender":
         scene = readNerfSyntheticInfo(
             path=cfg.data_path,
-            white_background=False,
+            white_background=cfg.white_background,
             depths=cfg.depths,
             eval=cfg.eval,
         )
@@ -173,7 +180,7 @@ def main(
                 raise SystemExit(1)
             change_scene = readNerfSyntheticInfo(
                 path=change_path,
-                white_background=False,
+                white_background=cfg.white_background,
                 depths=cfg.depths,
                 eval=cfg.eval,
             )

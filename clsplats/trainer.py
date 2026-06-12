@@ -6,8 +6,11 @@ detect → lift → constrain → optimise → prune.
 
 from collections import defaultdict
 from pathlib import Path
-from typing import List
+from random import randint
+from typing import TYPE_CHECKING, List
 
+import cv2
+import numpy as np
 import torch
 import torch.nn.functional as F
 from gsplat.rendering import rasterization
@@ -21,7 +24,10 @@ from clsplats.dataset.cameras import Camera
 from clsplats.dataset.dataset_reader import SceneInfo
 from clsplats.lifter.depth_anything_lifter import DepthAnythingLifter
 from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
-from clsplats.utils.custom_types import Image
+from clsplats.utils.sh_utils import RGB2SH
+
+if TYPE_CHECKING:
+    from clsplats.dataset.dataset_reader import CameraInfo
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +74,60 @@ def _manual_ssim(
     return ssim_map.mean()
 
 
+def _initial_scales_from_points(
+    xyz: torch.Tensor,
+    fallback_scale: float,
+    min_scale: float = 1e-4,
+) -> torch.Tensor:
+    """Initialise Gaussian scales from nearest-neighbour point spacing."""
+    if xyz.shape[0] < 2:
+        return torch.full_like(xyz, max(fallback_scale, min_scale))
+
+    from scipy.spatial import cKDTree
+
+    pts_np = xyz.detach().cpu().numpy()
+    distances, _ = cKDTree(pts_np).query(pts_np, k=2, workers=-1)
+    nn_dist = torch.as_tensor(distances[:, 1], dtype=xyz.dtype, device=xyz.device)
+    nn_dist = nn_dist.clamp_min(min_scale)
+    return nn_dist[:, None].repeat(1, 3)
+
+
+def _photometric_loss(
+    rendered: torch.Tensor,
+    gt: torch.Tensor,
+    lambda_dssim: float,
+) -> torch.Tensor:
+    """3DGS-style photometric loss: L1 mixed with DSSIM."""
+    l1 = (rendered - gt).abs().mean()
+    if lambda_dssim <= 0:
+        return l1
+
+    # The reference computes SSIM on the raw (unclamped) render.
+    pred_bchw = rendered.permute(2, 0, 1).unsqueeze(0)
+    gt_bchw = gt.permute(2, 0, 1).unsqueeze(0)
+    ssim_value = _manual_ssim(pred_bchw, gt_bchw)
+    return (1.0 - lambda_dssim) * l1 + lambda_dssim * (1.0 - ssim_value)
+
+
+def _load_gt_image(
+    image_path: str,
+    white_background: bool,
+    composite_alpha: bool,
+) -> PILImage.Image:
+    """Load a ground-truth image, compositing RGBA onto the background colour.
+
+    Mirrors the reference Blender reader: transparent pixels are blended onto
+    the training background so supervision covers empty space too.
+    """
+    img = PILImage.open(image_path)
+    if not composite_alpha or img.mode != "RGBA":
+        return img
+    arr = np.array(img.convert("RGBA")).astype(np.float32) / 255.0
+    bg = 1.0 if white_background else 0.0
+    rgb = arr[:, :, :3] * arr[:, :, 3:4] + bg * (1.0 - arr[:, :, 3:4])
+    return PILImage.fromarray((rgb * 255.0).astype(np.uint8), "RGB")
+
+
 class CLSplatsTrainer:
     """Minimal gsplat-backed trainer for continual-learning scene editing.
 
@@ -83,6 +143,13 @@ class CLSplatsTrainer:
         self._primitives: list = []
         self._outside_counts = None
         self._global_step = 0
+        # Iteration within the current timestep — drives the LR schedule and
+        # the gsplat strategy so densification applies at every timestep.
+        self._timestep_iter = 0
+        self._viewpoint_stack: list[Camera] = []
+        self._viewpoint_indices: list[int] = []
+        self.scene_extent = float(scene.nerf_normalization.get("radius", 1.0))
+        self._is_nerf_synthetic = bool(scene.is_nerf_synthetic)
 
         # 1) Initialise Gaussians from scene point cloud
         pcd = scene.point_cloud
@@ -93,9 +160,9 @@ class CLSplatsTrainer:
         N = xyz.shape[0]
 
         sh_features = torch.zeros((N, 3, n_coeffs), device=self.device)
-        sh_features[:, :, 0] = rgb  # DC term encodes RGB
+        sh_features[:, :, 0] = RGB2SH(rgb)  # DC term encodes RGB as SH coefficients
 
-        scales = torch.full((N, 3), cfg.model.init_scale, device=self.device)
+        scales = _initial_scales_from_points(xyz, cfg.model.init_scale)
         quats = torch.zeros((N, 4), device=self.device)
         quats[:, 0] = 1.0
         opacity = torch.full((N, 1), cfg.model.init_opacity, device=self.device)
@@ -107,40 +174,82 @@ class CLSplatsTrainer:
             sh_features=sh_features,
             opacity=opacity,
         )
-        self.gaussians = CLGaussians(cfg, params)
+        # 3DGS scales the position learning rate by the camera extent.
+        self.gaussians = CLGaussians(cfg, params, spatial_lr_scale=self.scene_extent)
+        self.gaussians.initialize_strategy_state(self.scene_extent)
 
         # 2) Cameras and change detector
         self.train_cameras: List[Camera] = []
         for uid, cam_info in enumerate(scene.train_cameras):
-            img = PILImage.open(cam_info.image_path)
-            resolution = (cam_info.width, cam_info.height)
-            cam = Camera(
-                resolution=resolution,
-                colmap_id=cam_info.uid,
-                R=cam_info.R,
-                T=cam_info.T,
-                FoVx=cam_info.FovX,
-                FoVy=cam_info.FovY,
-                depth_params=cam_info.depth_params,
-                image=img,
-                invdepthmap=None,
-                image_name=cam_info.image_name,
-                uid=uid,
-                data_device="cpu",
-                train_test_exp=False,
-                is_test_dataset=False,
-                is_test_view=cam_info.is_test,
-                timestep=cam_info.timestep,
+            self.train_cameras.append(
+                self._camera_from_info(cam_info, uid, scene.is_nerf_synthetic)
             )
-            self.train_cameras.append(cam)
 
         # Group cameras by timestep for temporal data
         self._cameras_by_timestep: dict[int, list] = defaultdict(list)
         for cam in self.train_cameras:
             self._cameras_by_timestep[cam.timestep].append(cam)
+        self._reset_viewpoint_stack()
 
         self.detector = DinoV2Detector(cfg.change)
         self.lifter = DepthAnythingLifter(cfg)
+
+    def _reset_viewpoint_stack(self) -> None:
+        self._viewpoint_stack = self.train_cameras.copy()
+        self._viewpoint_indices = list(range(len(self._viewpoint_stack)))
+
+    def _pop_random_train_camera(self) -> Camera:
+        if not self._viewpoint_stack:
+            self._reset_viewpoint_stack()
+        rand_idx = randint(0, len(self._viewpoint_indices) - 1)
+        self._viewpoint_indices.pop(rand_idx)
+        return self._viewpoint_stack.pop(rand_idx)
+
+    @staticmethod
+    def _load_invdepthmap(cam_info, is_nerf_synthetic: bool):
+        """Load inverse depth using the same scaling convention as 3DGS."""
+        depth_path = getattr(cam_info, "depth_path", "")
+        if not depth_path:
+            return None
+        invdepth = cv2.imread(depth_path, -1)
+        if invdepth is None:
+            raise FileNotFoundError(f"Depth file not found or unreadable: {depth_path}")
+        invdepth = invdepth.astype(np.float32)
+        if is_nerf_synthetic:
+            return invdepth / 512.0
+        return invdepth / float(2**16)
+
+    def _camera_from_info(
+        self,
+        cam_info,
+        uid: int,
+        is_nerf_synthetic: bool,
+        timestep: int | None = None,
+    ) -> Camera:
+        """Build a Camera from CameraInfo, including optional inverse depth."""
+        img = _load_gt_image(
+            cam_info.image_path,
+            white_background=getattr(self.cfg, "white_background", False),
+            composite_alpha=is_nerf_synthetic,
+        )
+        return Camera(
+            resolution=(cam_info.width, cam_info.height),
+            colmap_id=cam_info.uid,
+            R=cam_info.R,
+            T=cam_info.T,
+            FoVx=cam_info.FovX,
+            FoVy=cam_info.FovY,
+            depth_params=cam_info.depth_params,
+            image=img,
+            invdepthmap=self._load_invdepthmap(cam_info, is_nerf_synthetic),
+            image_name=cam_info.image_name,
+            uid=uid,
+            data_device="cpu",
+            train_test_exp=False,
+            is_test_dataset=False,
+            is_test_view=cam_info.is_test,
+            timestep=cam_info.timestep if timestep is None else timestep,
+        )
 
     def update_cameras(self, scene: SceneInfo, timestep: int) -> None:
         """Load new cameras from *scene* for the given *timestep*.
@@ -148,29 +257,17 @@ class CLSplatsTrainer:
         Used for the Blender/NeRF-Synthetic temporal workflow where each
         timestep lives in a separate directory.
         """
+        self._is_nerf_synthetic = bool(scene.is_nerf_synthetic)
         new_cameras: list[Camera] = []
         for uid, cam_info in enumerate(scene.train_cameras):
-            img = PILImage.open(cam_info.image_path)
-            resolution = (cam_info.width, cam_info.height)
-            cam = Camera(
-                resolution=resolution,
-                colmap_id=cam_info.uid,
-                R=cam_info.R,
-                T=cam_info.T,
-                FoVx=cam_info.FovX,
-                FoVy=cam_info.FovY,
-                depth_params=cam_info.depth_params,
-                image=img,
-                invdepthmap=None,
-                image_name=cam_info.image_name,
-                uid=uid,
-                data_device="cpu",
-                train_test_exp=False,
-                is_test_dataset=False,
-                is_test_view=cam_info.is_test,
-                timestep=timestep,
+            new_cameras.append(
+                self._camera_from_info(
+                    cam_info,
+                    uid,
+                    scene.is_nerf_synthetic,
+                    timestep=timestep,
+                )
             )
-            new_cameras.append(cam)
         self._cameras_by_timestep[timestep] = new_cameras
 
     def prepare_timestep(self, timestep: int) -> None:
@@ -182,40 +279,62 @@ class CLSplatsTrainer:
         """
         assert timestep < self.cfg.train.num_times, "timestep >= num_times"
         self.timestep = timestep
+        self._timestep_iter = 0
 
         # Select cameras for this timestep (if temporal data is available)
         if timestep in self._cameras_by_timestep:
             self.train_cameras = self._cameras_by_timestep[timestep]
+            self._reset_viewpoint_stack()
 
         if len(self.train_cameras) == 0:
             self.active_mask = None
             return
 
         start_time = self.cfg.train.start_time
-        if timestep == start_time:
+        is_initial = timestep == start_time
+
+        # Fresh strategy + state per timestep: the densification window is
+        # driven by the per-timestep iteration, and the global opacity reset
+        # must not run during the CL phase (it would clamp the opacities of
+        # inactive Gaussians, which can never recover through masked grads).
+        self.gaussians.setup_timestep(self.scene_extent, allow_opacity_reset=is_initial)
+
+        if is_initial:
             N = self.gaussians.params.positions.shape[0]
             self.active_mask = torch.ones(N, dtype=torch.bool, device=self.device)
             self._primitives = []
             self._outside_counts = None
             return
 
-        # Detect → lift
+        # The representation is already trained at full SH resolution; the
+        # progressive activation only applies to the initial reconstruction.
+        self.gaussians.active_sh_degree = self.gaussians.max_sh_degree
+
+        # Detect → lift. Rendered depths anchor the lifter's monocular depth
+        # to the scene's metric scale.
         change_masks = []
+        rendered_depths = []
         for cam in self.train_cameras:
-            rendered = self._render_camera(cam)
-            gt = cam.original_image.permute(1, 2, 0).contiguous().to(self.device)
             with torch.no_grad():
+                rendered, rendered_depth = self._render_camera(cam, return_depth=True)
                 change_mask_2d = self.detector.predict_change_mask(
                     rendered_image=rendered,
-                    observation=gt,
+                    observation=cam.original_image.permute(1, 2, 0).contiguous().to(self.device),
                 )
             change_masks.append(change_mask_2d)
+            rendered_depths.append(rendered_depth)
 
         self.active_mask = self.lifter.lift(
             gaussians=self.gaussians,
             cameras=self.train_cameras,
             change_masks=change_masks,
+            rendered_depths=rendered_depths,
         )
+
+        # Inactive Gaussians must stay exactly frozen: zero their Adam
+        # moments so leftover momentum from earlier timesteps cannot move
+        # them despite masked gradients.
+        self.gaussians.reset_inactive_optimizer_state(self.active_mask)
 
         # Fit geometric primitives around active Gaussians
         if self.active_mask is not None and self.active_mask.any():
@@ -230,8 +349,12 @@ class CLSplatsTrainer:
         else:
             self._primitives = []
 
-    def _render_camera(self, cam: Camera) -> Image:
-        """Render a single camera view using gsplat rasterisation."""
+    def _render_camera(self, cam: Camera, return_info: bool = False, return_depth: bool = False):
+        """Render a single camera view using gsplat rasterisation.
+
+        With ``return_depth=True`` the expected depth map [H, W] is returned
+        alongside the image (0 where nothing was rendered).
+        """
         device = self.device
         means = self.gaussians.params.positions.to(device)
         quats = self.gaussians.params.quats.to(device)
@@ -242,7 +365,9 @@ class CLSplatsTrainer:
         sh_feats = self.gaussians.params.sh_features.to(device)
         colors = sh_feats.permute(0, 2, 1).contiguous()
 
-        viewmats = cam.world_view_transform.to(device).unsqueeze(0)
+        # Camera stores the 3DGS rasterizer convention (transposed / column
+        # major); gsplat expects a plain row-major world-to-camera matrix.
+        viewmats = cam.world_view_transform.transpose(0, 1).to(device).unsqueeze(0)
         Ks = torch.zeros(1, 3, 3, device=device, dtype=means.dtype)
         Ks[..., 0, 0] = cam.fx
         Ks[..., 1, 1] = cam.fy
@@ -253,7 +378,14 @@ class CLSplatsTrainer:
         width = cam.image_width
         height = cam.image_height
 
-        render_colors, render_alphas, _ = rasterization(
+        # Match the GT compositing background (reference renders Blender
+        # scenes onto the configured background colour; gsplat defaults to
+        # black when no background is given).
+        backgrounds = None
+        if getattr(self.cfg, "white_background", False):
+            backgrounds = torch.ones(1, 3, device=device, dtype=means.dtype)
+
+        render_colors, render_alphas, info = rasterization(
             means=means,
             quats=quats,
             scales=scales,
@@ -263,12 +395,21 @@ class CLSplatsTrainer:
             Ks=Ks,
             width=width,
             height=height,
-            sh_degree=self.cfg.model.sh_degree,
+            sh_degree=self.gaussians.active_sh_degree,
+            backgrounds=backgrounds,
             packed=False,
             distributed=False,
+            render_mode="RGB+ED" if return_depth else "RGB",
         )
 
-        img = render_colors[0]  # [H, W, 3]
+        img = render_colors[0, ..., :3]  # [H, W, 3]
+        if return_depth:
+            depth = render_colors[0, ..., 3]  # [H, W] expected depth
+            if return_info:
+                return img.contiguous(), depth.contiguous(), info
+            return img.contiguous(), depth.contiguous()
+        if return_info:
+            return img.contiguous(), info
         return img.contiguous()
 
     def _train_step(self, cam: Camera) -> dict:
@@ -281,82 +422,132 @@ class CLSplatsTrainer:
         Returns:
             Dictionary with ``"loss"`` key.
         """
-        rendered = self._render_camera(cam)
+        start_time = self.cfg.train.start_time
+        iteration = self._timestep_iter + 1
+        self.gaussians.update_learning_rate(iteration)
+        if self.timestep == start_time:
+            # Progressive SH only applies to the initial reconstruction; at
+            # later timesteps the model already carries trained SH features.
+            self.gaussians.update_sh_degree(iteration)
+
+        old_count = self.gaussians.num_gaussians
+        rendered, raster_info = self._render_camera(cam, return_info=True)
+        self.gaussians.step_pre_backward(self._timestep_iter, raster_info)
         gt = cam.original_image.permute(1, 2, 0).contiguous().to(self.device)
 
-        photometric_loss = (rendered - gt).pow(2).mean()
+        if cam.alpha_mask is not None:
+            alpha_mask = cam.alpha_mask.permute(1, 2, 0).contiguous().to(self.device)
+            rendered = rendered * alpha_mask
 
-        d_union_full = None
-        start_time = self.cfg.train.start_time
-        if self.timestep > start_time and self.active_mask is not None and self._primitives:
-            pts = self.gaussians.params.positions
-            d_union_full = union_distance(pts, self._primitives)
+        photometric_loss = _photometric_loss(
+            rendered,
+            gt,
+            lambda_dssim=self.cfg.train.lambda_dssim,
+        )
+
+        total_loss = photometric_loss
+        if (
+            self.timestep > start_time
+            and self.active_mask is not None
+            and self._primitives
+            and self.cfg.constraints.lambda_bound > 0
+        ):
+            # Full N×P distance — only worth computing when the bound loss
+            # actually contributes.
+            d_union_full = union_distance(self.gaussians.params.positions, self._primitives)
             mask = self.active_mask.to(self.device)
             if mask.any():
                 loss_bound = d_union_full[mask].mean()
                 total_loss = photometric_loss + self.cfg.constraints.lambda_bound * loss_bound
-            else:
-                total_loss = photometric_loss
-        else:
-            total_loss = photometric_loss
         total_loss.backward()
 
         # Zero gradients for inactive Gaussians (from t1+)
         if self.timestep > start_time and self.active_mask is not None:
-            mask = self.active_mask.to(self.device)
+            self.gaussians.mask_inactive_gradients(self.active_mask)
 
-            def apply_mask(param, extra_dims: int = 0):
-                if param.grad is None:
-                    return
-                view_shape = (mask.shape[0],) + (1,) * extra_dims
-                param.grad *= mask.view(*view_shape)
-
-            apply_mask(self.gaussians.params.positions, extra_dims=1)
-            apply_mask(self.gaussians.params.scales, extra_dims=1)
-            apply_mask(self.gaussians.params.quats, extra_dims=1)
-            apply_mask(self.gaussians.params.sh_features, extra_dims=2)
-            apply_mask(self.gaussians.params.opacity, extra_dims=1)
-
+        # The strategy may duplicate/split/remove Gaussians; the CL masks are
+        # carried through gsplat's ops and returned realigned.
+        self.active_mask, self._outside_counts = self.gaussians.step_post_backward(
+            self._timestep_iter, raster_info, self.active_mask, self._outside_counts
+        )
         self.gaussians.step_optimizer()
+        self._sync_after_strategy(old_count)
 
         # Hard pruning with hysteresis
         if (
             self.timestep > start_time
-            and d_union_full is not None
             and self.active_mask is not None
             and self._primitives
         ):
-            prune_every = self.cfg.constraints.prune_every
-            prune_dist = self.cfg.constraints.prune_dist_thresh
-            prune_consec = self.cfg.constraints.prune_consecutive
+            self._constraint_prune_step(iteration)
 
-            if self._global_step % prune_every == 0:
-                N = self.gaussians.params.positions.shape[0]
-                if self._outside_counts is None or self._outside_counts.shape[0] != N:
-                    self._outside_counts = torch.zeros(N, dtype=torch.int64, device=self.device)
-                outside = d_union_full > prune_dist
-                self._outside_counts[outside] += 1
-                self._outside_counts[~outside] = 0
-                prune_mask = self._outside_counts >= prune_consec
-                if prune_mask.any():
-                    keep = self.gaussians.prune_gaussians(prune_mask)
-                    self.active_mask = self.active_mask[keep]
-                    self._outside_counts = self._outside_counts[keep]
-                    # Re-fit primitives on remaining active Gaussians
-                    if self.active_mask.any():
-                        self._primitives = [
-                            prim
-                            for _, prim in fit_primitives_for_active(
-                                positions=self.gaussians.params.positions.detach(),
-                                active_mask=self.active_mask.detach(),
-                                radius_frac=self.cfg.constraints.group_radius_frac,
-                            )
-                        ]
-                    else:
-                        self._primitives = []
-
+        self._timestep_iter += 1
         self._global_step += 1
         return {"loss": float(total_loss.detach().cpu())}
+
+    def _constraint_prune_step(self, iteration: int) -> None:
+        """Prune *active* Gaussians that stay outside the fitted primitives.
+
+        Only the locally optimised (active) set may ever be pruned — the
+        frozen remainder of the scene must be preserved unconditionally,
+        regardless of its distance to the change region.
+        """
+        prune_every = self.cfg.constraints.prune_every
+        prune_dist = self.cfg.constraints.prune_dist_thresh
+        prune_consec = self.cfg.constraints.prune_consecutive
+
+        if iteration % prune_every != 0:
+            return
+
+        N = self.gaussians.params.positions.shape[0]
+        if self._outside_counts is None or self._outside_counts.shape[0] != N:
+            self._outside_counts = torch.zeros(N, dtype=torch.int64, device=self.device)
+        # Recompute on the current Gaussians — the strategy may have
+        # changed the count since the loss-time distance was taken.
+        with torch.no_grad():
+            d_union_now = union_distance(
+                self.gaussians.params.positions.detach(), self._primitives
+            )
+        outside = (d_union_now > prune_dist) & self.active_mask.to(self.device)
+        self._outside_counts[outside] += 1
+        self._outside_counts[~outside] = 0
+        prune_mask = self._outside_counts >= prune_consec
+        if prune_mask.any():
+            keep = self.gaussians.prune_gaussians(prune_mask)
+            self.active_mask = self.active_mask[keep]
+            self._outside_counts = self._outside_counts[keep]
+            # Re-fit primitives on remaining active Gaussians
+            self._refit_primitives()
+
+    def _sync_after_strategy(self, old_count: int) -> None:
+        """React to gsplat DefaultStrategy changing the Gaussian count.
+
+        The CL masks themselves are kept aligned by ``step_post_backward``
+        (they travel through gsplat's ops); only the fitted primitives need
+        refreshing here.
+        """
+        new_count = self.gaussians.num_gaussians
+        if new_count == old_count:
+            return
+
+        if self.active_mask is None:
+            self.active_mask = torch.ones(new_count, dtype=torch.bool, device=self.device)
+
+        if self.timestep > self.cfg.train.start_time:
+            self._refit_primitives()
+
+    def _refit_primitives(self) -> None:
+        if self.active_mask is not None and self.active_mask.any():
+            self._primitives = [
+                prim
+                for _, prim in fit_primitives_for_active(
+                    positions=self.gaussians.params.positions.detach(),
+                    active_mask=self.active_mask.detach(),
+                    radius_frac=self.cfg.constraints.group_radius_frac,
+                )
+            ]
+        else:
+            self._primitives = []
 
     def train(self) -> None:
         """Run the training loop for the current timestep."""
@@ -364,7 +555,7 @@ class CLSplatsTrainer:
         log_interval = self.cfg.train.log_interval
 
         for it in range(num_iters):
-            cam = self.train_cameras[it % len(self.train_cameras)]
+            cam = self._pop_random_train_camera()
             stats = self._train_step(cam)
 
             if (it + 1) % log_interval == 0:
@@ -426,11 +617,15 @@ class CLSplatsTrainer:
         psnr_values: list[float] = []
         ssim_values: list[float] = []
 
-        self.gaussians.params.positions.requires_grad_(False)  # inference only
-
         for cam_info in test_cameras:
-            # Build a Camera object from the CameraInfo namedtuple.
-            img_pil = PILImage.open(cam_info.image_path).convert("RGB")
+            # Build a Camera object from the CameraInfo namedtuple. Blender
+            # GT must be composited onto the training background (a plain
+            # RGB convert would keep junk colours under alpha=0).
+            img_pil = _load_gt_image(
+                cam_info.image_path,
+                white_background=getattr(self.cfg, "white_background", False),
+                composite_alpha=getattr(self, "_is_nerf_synthetic", False),
+            ).convert("RGB")
             cam = Camera(
                 resolution=(cam_info.width, cam_info.height),
                 colmap_id=cam_info.uid,
