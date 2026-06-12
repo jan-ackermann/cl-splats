@@ -249,6 +249,31 @@ cl-splats-eval \
 
 Rendered images are saved as `<out_dir>/t<N>/<name>_render.png` and `<name>_gt.png`. Metrics are printed to stdout.
 
+### Recovering Past Scene States (`cl-splats-history`)
+
+CL-Splats only optimises the Gaussians inside the changed region; the rest of the scene is frozen by construction. This makes every past timestep **exactly recoverable** from the final model plus a small per-timestep delta (the pre-update state of the changed Gaussians) — no need to store a full checkpoint per timestep.
+
+Train with `history.log_history=true` to save the deltas to `outputs/history/`, then reconstruct any earlier timestep:
+
+```bash
+cl-splats-history \
+    --ply outputs/gaussians_time_0001.ply \
+    --history-dir outputs/history \
+    --time 0 \
+    --out outputs/gaussians_recovered_t0.ply
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ply` / `-p` | *(required)* | Final `.ply` checkpoint (latest trained timestep) |
+| `--history-dir` | `outputs/history` | Directory with the per-timestep history records |
+| `--time` / `-t` | *(required)* | Timestep to recover (end-of-timestep state) |
+| `--out` / `-o` | *(required)* | Output path for the recovered `.ply` |
+
+The recovered checkpoint is bit-identical to the model as it existed at that timestep and can be evaluated with `cl-splats-eval` or opened in any 3DGS viewer.
+
 
 ## Configuration
 
@@ -306,7 +331,7 @@ I continue to release the missing modules required to replicate our method.
 - [x] Release data.
 - [x] ~~Release local-optimization CUDA kernels.~~
 - [x] Verify codebase.
-- [ ] Release history recovery.
+- [x] Release history recovery.
 
 ## Disclaimer
 
