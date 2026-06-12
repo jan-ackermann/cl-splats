@@ -144,6 +144,7 @@ cl-splats-train --data-path path/to/Level-1 --change-type add
 | `--images` | `images` | Name of the images subdirectory |
 | `--depths` | `""` | Name of the depths subdirectory (optional) |
 | `--eval` | `False` | Evaluate on a held-out test split after training |
+| `--white-background` | `False` | Composite and render Blender scenes onto a white background (NeRF-Synthetic benchmark convention) |
 | `--offline` / `--no-offline` | `False` | Disable all network access — sets `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and forces W&B offline. Use when running without internet (e.g. air-gapped servers). |
 | `--config-name` | `cl-splats` | Hydra config file to load from `configs/` (without `.yaml`) |
 
@@ -258,7 +259,7 @@ The default config lives in `configs/cl-splats.yaml`. A summary of the most usef
 |---|---|---|
 | `sh_degree` | `0` | Spherical harmonics degree (0 = colour only) |
 | `init_scale` | `0.01` | Initial Gaussian scale |
-| `init_opacity` | `0.5` | Initial Gaussian opacity |
+| `init_opacity` | `0.1` | Initial Gaussian opacity |
 
 ### `constraints` — Geometry constraints
 | Key | Default | Description |
@@ -278,7 +279,7 @@ I continue to release the missing modules required to replicate our method.
 - [x] Release pruning module.
 - [x] Release data.
 - [x] ~~Release local-optimization CUDA kernels.~~
-- [ ] Verify codebase.
+- [x] Verify codebase.
 - [ ] Release history recovery.
 
 ## Citation
