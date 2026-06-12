@@ -5,8 +5,11 @@ lifts 2-D change masks into a per-Gaussian change mask using multi-view
 depth back-projection and Gaussian proximity scoring.
 """
 
+from typing import Optional
+
 import numpy as np
 import torch
+from loguru import logger
 from PIL import Image as PILImage
 
 from clsplats.config import CLSplatsConfig
@@ -14,6 +17,45 @@ from clsplats.dataset.cameras import Camera
 from clsplats.lifter.base_lifter import BaseLifter
 from clsplats.representation.cl_gaussians import CLGaussians
 from clsplats.utils.custom_types import Image
+
+
+def align_relative_depth(
+    mono: torch.Tensor,
+    rendered_depth: torch.Tensor,
+    change_mask: torch.Tensor,
+    min_pixels: int = 200,
+) -> Optional[torch.Tensor]:
+    """Anchor relative monocular depth to the scene's metric scale.
+
+    Depth-Anything (like MiDaS) predicts affine-invariant *disparity*. Fit
+    ``1/z ≈ a * mono + b`` by least squares over pixels that are unchanged
+    (the existing model is valid there) and covered by the render, then
+    return the metric depth ``1 / (a * mono + b)`` for the whole image.
+
+    Returns None when the fit is unusable (too few anchor pixels or a
+    non-positive scale).
+    """
+    valid = (~change_mask) & (rendered_depth > 1e-6) & torch.isfinite(mono)
+    if int(valid.sum()) < min_pixels:
+        return None
+
+    x = mono[valid].float()
+    y = 1.0 / rendered_depth[valid].float()  # target disparity
+    ones = torch.ones_like(x)
+    A = torch.stack([x, ones], dim=-1)  # [M, 2]
+    solution = torch.linalg.lstsq(A, y.unsqueeze(-1)).solution.squeeze(-1)
+    a, b = float(solution[0]), float(solution[1])
+
+    # Reject fits where the mono signal doesn't explain the anchor
+    # disparities (R² in disparity space) — a degenerate prediction
+    # collapses to the constant fit with R² ≈ 0.
+    ss_res = ((a * x + b - y) ** 2).sum()
+    ss_tot = ((y - y.mean()) ** 2).sum().clamp_min(1e-12)
+    if float(1.0 - ss_res / ss_tot) < 0.3:
+        return None
+
+    disparity = (a * mono + b).clamp_min(1e-6)
+    return 1.0 / disparity
 
 
 class DepthAnythingLifter(BaseLifter):
@@ -64,6 +106,7 @@ class DepthAnythingLifter(BaseLifter):
         gaussians: CLGaussians,
         cameras: "list[Camera]",
         change_masks: "list[torch.Tensor]",
+        rendered_depths: "Optional[list[torch.Tensor]]" = None,
     ) -> torch.Tensor:
         """Multi-view lifting.
 
@@ -88,12 +131,28 @@ class DepthAnythingLifter(BaseLifter):
         means = gaussians.params.positions  # (N, 3)
         scales = gaussians.params.scales  # (N, 3)
 
+        skipped_views = 0
         for view_id, (cam, mask) in enumerate(zip(cameras, change_masks)):
             obs = cam.original_image.permute(1, 2, 0).contiguous()
-            depth = self.estimate_depth(obs).to(device)  # [H, W]
+            depth = self.estimate_depth(obs).to(device)  # [H, W], relative
+            mask = mask.to(device)
+
+            # Monocular depth is relative — anchor it to the scene's metric
+            # scale using the rendered depth of the current model. Without
+            # the alignment, back-projections land in empty space and the
+            # depth-consistency gate rejects every Gaussian.
+            if rendered_depths is not None:
+                aligned = align_relative_depth(
+                    mono=depth,
+                    rendered_depth=rendered_depths[view_id].to(device),
+                    change_mask=mask > 0.5,
+                )
+                if aligned is None:
+                    skipped_views += 1
+                    continue
+                depth = aligned
 
             H, W = depth.shape
-            mask = mask.to(device)
 
             # --- Positive pixels (changed) ---
             pos_pixels = (mask > 0.5) & torch.isfinite(depth) & (depth > 0)
@@ -114,8 +173,10 @@ class DepthAnythingLifter(BaseLifter):
 
                 ones = torch.ones_like(z_cam)
                 p_cam = torch.stack([x_cam, y_cam, z_cam, ones], dim=-1)  # [M, 4]
+                # Twc is stored in the 3DGS transposed convention, so row
+                # vectors are transformed by right-multiplying it directly.
                 Twc = cam.Twc.to(device)  # [4, 4]
-                p_world_h = p_cam @ Twc.T  # [M, 4]
+                p_world_h = p_cam @ Twc  # [M, 4]
                 p_world = p_world_h[..., :3] / p_world_h[..., 3:]  # [M, 3]
 
                 # kNN in Gaussian means — cap M so cdist stays in memory
@@ -132,13 +193,13 @@ class DepthAnythingLifter(BaseLifter):
                 if valid.any():
                     # Depth consistency: project only the k neighbour means (not all N)
                     # into camera space — (M, k, 4) instead of (M, N, 4).
-                    Tcw = torch.inverse(Twc)  # [4, 4]
+                    Tcw = torch.inverse(Twc)  # [4, 4], transposed convention
                     knn_means = means[knn_idx]  # [M, k, 3]
                     M, k = knn_means.shape[:2]
                     knn_means_h = torch.cat(
                         [knn_means, torch.ones(M, k, 1, device=device)], dim=-1
                     )  # [M, k, 4]
-                    knn_cam = knn_means_h @ Tcw.T  # [M, k, 4]
+                    knn_cam = knn_means_h @ Tcw  # [M, k, 4]
                     z_knn = knn_cam[..., 2]  # [M, k]
 
                     depth_pix = d.unsqueeze(-1)  # [M, 1]
@@ -188,7 +249,7 @@ class DepthAnythingLifter(BaseLifter):
                 ones_n = torch.ones_like(z_cam_n)
                 p_cam_n = torch.stack([x_cam_n, y_cam_n, z_cam_n, ones_n], dim=-1)
                 Twc = cam.Twc.to(device)
-                p_world_h_n = p_cam_n @ Twc.T
+                p_world_h_n = p_cam_n @ Twc
                 # Bug 4 fix: removed incorrect .unsqueeze(-1)
                 p_world_n = p_world_h_n[..., :3] / p_world_h_n[..., 3:]
 
@@ -223,6 +284,13 @@ class DepthAnythingLifter(BaseLifter):
 
                     affected_n = torch.unique(flat_idx_n)
                     visible_views[affected_n] += 1
+
+        if skipped_views:
+            logger.warning(
+                "Depth alignment failed for {n}/{total} views (skipped).",
+                n=skipped_views,
+                total=len(cameras),
+            )
 
         # Combine evidence
         # Bug 10 fix: confidence thresholding variables were computed but unused; removed.

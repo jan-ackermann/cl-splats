@@ -6,7 +6,7 @@ located in changed regions.
 """
 
 import abc
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
@@ -27,6 +27,7 @@ class BaseLifter(abc.ABC):
         gaussians: "CLGaussians",
         cameras: List["Camera"],
         change_masks: List[torch.Tensor],
+        rendered_depths: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Lift 2-D change masks into a per-Gaussian boolean mask.
 
@@ -34,6 +35,9 @@ class BaseLifter(abc.ABC):
             gaussians: The current set of Gaussians.
             cameras: Camera objects for each view.
             change_masks: Per-view 2-D change masks ``[H, W]``.
+            rendered_depths: Per-view metric depths ``[H, W]`` rendered from
+                the current model, used to anchor relative monocular depth
+                to the scene scale.
 
         Returns:
             Boolean mask of shape ``(N,)`` over Gaussians.
