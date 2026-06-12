@@ -179,9 +179,7 @@ class TestBug05_OptimizerUpdatedAfterPruning:
         from typing import cast
 
         from clsplats.config import CLSplatsConfig
-        cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
-        base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
-        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
+        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.structured(CLSplatsConfig))
         from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 
         N = 20
@@ -214,9 +212,7 @@ class TestBug05_OptimizerUpdatedAfterPruning:
         from typing import cast
 
         from clsplats.config import CLSplatsConfig
-        cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
-        base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
-        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
+        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.structured(CLSplatsConfig))
         from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 
         N = 20
@@ -438,7 +434,7 @@ class TestConfigModule:
 
         cfg = CLSplatsConfig()
         assert cfg.model.sh_degree == 0
-        assert cfg.train.lr == 1e-3
+        assert cfg.train.position_lr_init == 1.6e-4
         assert cfg.lifter.k_nn == 8
 
     def test_all_fields_have_defaults(self):
@@ -484,9 +480,7 @@ class TestCLGaussiansIntegration:
 
         from clsplats.config import CLSplatsConfig
         from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
-        cfg_dict = omegaconf.OmegaConf.create({"train": {"lr": 1e-3}})
-        base_cfg = omegaconf.OmegaConf.structured(CLSplatsConfig)
-        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.merge(base_cfg, cfg_dict))
+        cfg = cast(CLSplatsConfig, omegaconf.OmegaConf.structured(CLSplatsConfig))
         params = GaussianParams(
             positions=torch.randn(n, 3),
             scales=torch.full((n, 3), 0.01),

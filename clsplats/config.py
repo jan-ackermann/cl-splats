@@ -23,7 +23,6 @@ class ModelConfig:
 class TrainConfig:
     """Training loop settings."""
 
-    lr: float = 1e-3
     position_lr_init: float = 1.6e-4
     position_lr_final: float = 1.6e-6
     position_lr_delay_mult: float = 0.01
@@ -109,7 +108,6 @@ class CLSplatsConfig:
     # Dataset arguments (usually overridden CLI or via basic YAML)
     data_path: str = "."
     images: str = "images"
-    depths: str = ""
     eval: bool = False
     train_test_exp: bool = False
     # Blender/NeRF-Synthetic: composite GT and render onto a white background

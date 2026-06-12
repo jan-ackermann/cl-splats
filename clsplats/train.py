@@ -59,7 +59,6 @@ def main(
         ".", "--data-path", "-d", help="Path to the dataset directory (e.g., COLMAP workspace)."
     ),
     images: str = typer.Option("images", help="Name of the images subdirectory."),
-    depths: str = typer.Option("", help="Name of the depths subdirectory (optional)."),
     eval_split: bool = typer.Option(False, "--eval", help="Whether to evaluate on a test split."),
     white_background: bool = typer.Option(
         False,
@@ -106,8 +105,6 @@ def main(
             cfg_overrides.append(f"data_path={data_path}")
         if images != "images":
             cfg_overrides.append(f"images={images}")
-        if depths != "":
-            cfg_overrides.append(f"depths={depths}")
         if eval_split:
             cfg_overrides.append("eval=True")
         if white_background:
@@ -134,14 +131,12 @@ def main(
         scene = readNerfSyntheticInfo(
             path=cfg.data_path,
             white_background=cfg.white_background,
-            depths=cfg.depths,
             eval=cfg.eval,
         )
     else:
         scene = readColmapSceneInfo(
             path=cfg.data_path,
             images=cfg.images,
-            depths=cfg.depths,
             eval=cfg.eval,
             train_test_exp=cfg.train_test_exp,
         )
@@ -181,7 +176,6 @@ def main(
             change_scene = readNerfSyntheticInfo(
                 path=change_path,
                 white_background=cfg.white_background,
-                depths=cfg.depths,
                 eval=cfg.eval,
             )
             trainer.update_cameras(change_scene, time)

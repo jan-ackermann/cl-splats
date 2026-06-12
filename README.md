@@ -168,7 +168,6 @@ cl-splats-train --data-path path/to/Level-1 --change-type add
 | `--data-path` / `-d` | `.` | Path to the dataset root directory |
 | `--change-type` / `-c` | `None` | Change type for Blender CL datasets (`add`, `delete`, `move`, `multi`). Omit for COLMAP/single-timestep scenes. |
 | `--images` | `images` | Name of the images subdirectory |
-| `--depths` | `""` | Name of the depths subdirectory (optional) |
 | `--eval` | `False` | Evaluate on a held-out test split after training |
 | `--white-background` | `False` | Composite and render Blender scenes onto a white background (NeRF-Synthetic benchmark convention) |
 | `--offline` / `--no-offline` | `False` | Disable all network access — sets `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and forces W&B offline. Use when running without internet (e.g. air-gapped servers). |
@@ -181,10 +180,10 @@ Run `cl-splats-train --help` to see all options.
 Any configuration value can be overridden directly on the command line as positional arguments using Hydra dot-notation:
 
 ```bash
-# More iterations, lower learning rate
+# More iterations, lower position learning rate
 cl-splats-train --data-path path/to/dataset \
     train.iters_per_timestep=500 \
-    train.lr=5e-4
+    train.position_lr_init=8e-5
 
 # Tighter change-detection threshold with dilation
 cl-splats-train --data-path path/to/Level-1 --change-type add \
@@ -282,7 +281,7 @@ The default config lives in `configs/cl-splats.yaml`. A summary of the most usef
 ### `train`
 | Key | Default | Description |
 |---|---|---|
-| `lr` | `1e-3` | Learning rate |
+| `position_lr_init` | `1.6e-4` | Initial position learning rate (3DGS schedule, scaled by scene extent) |
 | `iters_per_timestep` | `100` | Optimisation iterations per timestep |
 | `num_times` | `1` | Number of timesteps (auto-set to `2` for Blender + `--change-type`) |
 | `start_time` | `0` | First timestep index to optimise |

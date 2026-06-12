@@ -49,7 +49,7 @@ cl-splats-history = "clsplats.history:app"
 cl-splats-preprocess = "clsplats.utils.preprocessing:main"
 
 [tool.setuptools.packages.find]
-include = ["clsplats*", "simple_knn*"]
+include = ["clsplats*"]
 
 [tool.ruff]
 line-length = 100

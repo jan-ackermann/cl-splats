@@ -20,7 +20,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 import typer
 from loguru import logger
@@ -31,6 +30,7 @@ from clsplats.dataset.dataset_reader import (
     readColmapSceneInfo,
     readNerfSyntheticInfo,
 )
+from clsplats.history import load_raw_ply
 from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 from clsplats.trainer import CLSplatsTrainer
 
@@ -47,45 +47,14 @@ def _load_gaussians_from_ply(ply_path: str, cfg: CLSplatsConfig) -> CLGaussians:
     The file layout matches what :meth:`CLGaussians.export_ply` writes via
     ``gsplat.exporter.export_splats``.
     """
-    from plyfile import PlyData
-
-    plydata = PlyData.read(ply_path)
-    v = plydata["vertex"]
-
-    # Positions
-    xyz = np.stack([v["x"], v["y"], v["z"]], axis=-1).astype(np.float32)
-
-    # Scales (stored as log-scale in gsplat export)
-    scales = np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=-1).astype(np.float32)
-    scales = np.exp(scales)  # undo log
-
-    # Rotations (quaternion, stored as rot_0..rot_3)
-    quats = np.stack([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=-1).astype(np.float32)
-
-    # Opacity (stored as logit in gsplat export)
-    opacity_raw = v["opacity"].astype(np.float32).reshape(-1, 1)
-    opacity = 1.0 / (1.0 + np.exp(-opacity_raw))  # sigmoid
-
-    # SH features: DC term is f_dc_0..f_dc_2, rest are f_rest_0..f_rest_N
-    dc = np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=-1).astype(np.float32)  # (N, 3)
-
-    # Count higher-order coefficients
-    rest_cols = sorted([p.name for p in v.properties if p.name.startswith("f_rest_")])
-    if rest_cols:
-        rest = np.stack([v[c] for c in rest_cols], axis=-1).astype(np.float32)  # (N, 3*(K-1))
-        n_rest = rest.shape[1] // 3
-        rest = rest.reshape(-1, n_rest, 3)  # (N, K-1, 3)
-        # PLY stores SH as (N, K, 3); CLGaussians keeps (N, 3, K).
-        sh_features = np.concatenate([dc[:, None, :], rest], axis=1).transpose(0, 2, 1)
-    else:
-        sh_features = dc[:, :, None]  # (N, 3, 1) — DC only
-
+    raw = load_raw_ply(ply_path)
+    sh = torch.cat([raw["sh0"], raw["shN"]], dim=1)  # (N, K, 3)
     params = GaussianParams(
-        positions=torch.from_numpy(xyz),
-        scales=torch.from_numpy(scales),
-        quats=torch.from_numpy(quats),
-        sh_features=torch.from_numpy(sh_features),
-        opacity=torch.from_numpy(opacity),
+        positions=raw["means"],
+        scales=torch.exp(raw["scales"]),
+        quats=raw["quats"],
+        sh_features=sh.permute(0, 2, 1).contiguous(),
+        opacity=torch.sigmoid(raw["opacities"]).unsqueeze(-1),
     )
     return CLGaussians(cfg, params)
 
@@ -127,20 +96,17 @@ def _load_scene(
             return readNerfSyntheticInfo(
                 path=change_path,
                 white_background=white_background,
-                depths="",
                 eval=eval_,
             )
         return readNerfSyntheticInfo(
             path=data_path,
             white_background=white_background,
-            depths="",
             eval=eval_,
         )
     else:
         return readColmapSceneInfo(
             path=data_path,
             images=images,
-            depths="",
             eval=eval_,
             train_test_exp=False,
         )

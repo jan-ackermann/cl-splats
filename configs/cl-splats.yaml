@@ -7,7 +7,6 @@ model:
   init_opacity: 0.1
 
 train:
-  lr: 1e-3
   position_lr_init: 1.6e-4
   position_lr_final: 1.6e-6
   position_lr_delay_mult: 0.01
@@ -69,7 +68,6 @@ wandb_mode: "offline"
 # Dataset paths (overridden at runtime via CLI)
 data_path: "."
 images: "images"
-depths: ""
 eval: false
 train_test_exp: false
 white_background: false

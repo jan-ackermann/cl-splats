@@ -40,14 +40,6 @@ class GaussianParams:
     opacity: torch.Tensor  # (N, 1)
 
 
-@dataclasses.dataclass
-class DensificationResult:
-    """Bookkeeping needed by the trainer after densification."""
-
-    keep_mask: torch.Tensor
-    new_parent_indices: torch.Tensor
-
-
 def _inverse_sigmoid(x: torch.Tensor) -> torch.Tensor:
     x = x.clamp(1e-6, 1.0 - 1e-6)
     return torch.log(x / (1.0 - x))
@@ -110,7 +102,6 @@ class CLGaussians:
 
         self.optimizers = self._build_optimizers()
         self.optimizer = self.optimizers["means"]
-        self._extra_state: Dict[str, torch.Tensor] = {}
         self.strategy = self._build_strategy()
         self.strategy.check_sanity(self.strategy_params, self.optimizers)
         self.strategy_state = self.strategy.initialize_state()
@@ -119,20 +110,11 @@ class CLGaussians:
     # Internals
     # ------------------------------------------------------------------
 
-    def _make_param_dict(
-        self,
-        params: GaussianParams,
-        cl_active: Optional[torch.Tensor] = None,
-        cl_outside_count: Optional[torch.Tensor] = None,
-    ) -> nn.ParameterDict:
+    def _make_param_dict(self, params: GaussianParams) -> nn.ParameterDict:
         n = params.positions.shape[0]
         # sh_features is (N, 3, K) → gsplat layout (N, K, 3), split into the
         # DC term and the higher-order coefficients (separate learning rates).
         sh = params.sh_features.detach().to(self.device).permute(0, 2, 1).contiguous()
-        if cl_active is None:
-            cl_active = torch.ones(n, device=self.device)
-        if cl_outside_count is None:
-            cl_outside_count = torch.zeros(n, device=self.device)
         return nn.ParameterDict(
             {
                 "means": nn.Parameter(params.positions.detach().to(self.device)),
@@ -145,24 +127,21 @@ class CLGaussians:
                 ),
                 "sh0": nn.Parameter(sh[:, :1, :]),
                 "shN": nn.Parameter(sh[:, 1:, :]),
-                "cl_active": nn.Parameter(cl_active.detach().float().to(self.device)),
-                "cl_outside_count": nn.Parameter(
-                    cl_outside_count.detach().float().to(self.device)
-                ),
+                "cl_active": nn.Parameter(torch.ones(n, device=self.device)),
+                "cl_outside_count": nn.Parameter(torch.zeros(n, device=self.device)),
             }
         )
 
     def _learning_rates(self) -> Dict[str, float]:
         train_cfg = self.cfg.train
-        lr = train_cfg.lr if hasattr(train_cfg, "lr") else 1e-3
         return {
-            "means": getattr(train_cfg, "position_lr_init", lr) * self.spatial_lr_scale,
-            "scales": getattr(train_cfg, "scaling_lr", lr),
-            "quats": getattr(train_cfg, "rotation_lr", lr),
-            "sh0": getattr(train_cfg, "feature_lr", lr),
+            "means": train_cfg.position_lr_init * self.spatial_lr_scale,
+            "scales": train_cfg.scaling_lr,
+            "quats": train_cfg.rotation_lr,
+            "sh0": train_cfg.feature_lr,
             # 3DGS trains the higher-order SH coefficients at feature_lr / 20.
-            "shN": getattr(train_cfg, "feature_lr", lr) / 20.0,
-            "opacities": getattr(train_cfg, "opacity_lr", lr),
+            "shN": train_cfg.feature_lr / 20.0,
+            "opacities": train_cfg.opacity_lr,
             "cl_active": 0.0,
             "cl_outside_count": 0.0,
         }
@@ -245,10 +224,9 @@ class CLGaussians:
         3DGS).
         """
         train_cfg = self.cfg.train
-        base_lr = getattr(train_cfg, "lr", 1e-3)
-        lr_init = getattr(train_cfg, "position_lr_init", base_lr) * self.spatial_lr_scale
-        lr_final = getattr(train_cfg, "position_lr_final", lr_init) * self.spatial_lr_scale
-        max_steps = max(getattr(train_cfg, "position_lr_max_steps", 0), 1)
+        lr_init = train_cfg.position_lr_init * self.spatial_lr_scale
+        lr_final = train_cfg.position_lr_final * self.spatial_lr_scale
+        max_steps = max(train_cfg.position_lr_max_steps, 1)
 
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
             lr = 0.0
@@ -263,11 +241,6 @@ class CLGaussians:
         """Match 3DGS progressive SH activation: one degree every 1000 iterations."""
         self.active_sh_degree = min(self.max_sh_degree, max(iteration, 0) // 1000)
         return self.active_sh_degree
-
-    def oneupSHdegree(self) -> None:
-        """Compatibility with the original 3DGS method name."""
-        if self.active_sh_degree < self.max_sh_degree:
-            self.active_sh_degree += 1
 
     # ------------------------------------------------------------------
     # Public API
@@ -418,18 +391,6 @@ class CLGaussians:
                 buf = state.get(key)
                 if buf is not None and buf.shape[0] == inactive.shape[0]:
                     buf[inactive] = 0.0
-
-    def split_gaussians(self, active_mask: torch.Tensor) -> Optional[DensificationResult]:
-        """Compatibility no-op; densification is handled by gsplat.DefaultStrategy."""
-        _ = active_mask
-        return None
-
-    def unify_gaussians(self) -> None:
-        """Placeholder for bookkeeping after local edits.
-
-        Currently a no-op.
-        """
-        return
 
     @torch.no_grad()
     def export_ply(self, path: str) -> None:

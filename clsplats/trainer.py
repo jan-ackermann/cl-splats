@@ -9,7 +9,6 @@ from pathlib import Path
 from random import randint
 from typing import TYPE_CHECKING, List
 
-import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -207,20 +206,6 @@ class CLSplatsTrainer:
         self._viewpoint_indices.pop(rand_idx)
         return self._viewpoint_stack.pop(rand_idx)
 
-    @staticmethod
-    def _load_invdepthmap(cam_info, is_nerf_synthetic: bool):
-        """Load inverse depth using the same scaling convention as 3DGS."""
-        depth_path = getattr(cam_info, "depth_path", "")
-        if not depth_path:
-            return None
-        invdepth = cv2.imread(depth_path, -1)
-        if invdepth is None:
-            raise FileNotFoundError(f"Depth file not found or unreadable: {depth_path}")
-        invdepth = invdepth.astype(np.float32)
-        if is_nerf_synthetic:
-            return invdepth / 512.0
-        return invdepth / float(2**16)
-
     def _camera_from_info(
         self,
         cam_info,
@@ -241,9 +226,7 @@ class CLSplatsTrainer:
             T=cam_info.T,
             FoVx=cam_info.FovX,
             FoVy=cam_info.FovY,
-            depth_params=cam_info.depth_params,
             image=img,
-            invdepthmap=self._load_invdepthmap(cam_info, is_nerf_synthetic),
             image_name=cam_info.image_name,
             uid=uid,
             data_device="cpu",
@@ -663,9 +646,7 @@ class CLSplatsTrainer:
                 T=cam_info.T,
                 FoVx=cam_info.FovX,
                 FoVy=cam_info.FovY,
-                depth_params=cam_info.depth_params,
                 image=img_pil,
-                invdepthmap=None,
                 image_name=cam_info.image_name,
                 uid=cam_info.uid,
                 data_device="cpu",
@@ -750,8 +731,6 @@ class CLSplatsTrainer:
 
     def log_history(self) -> None:
         """Export Gaussians and log metrics."""
-        from pathlib import Path
-
         # We export the point cloud to the current working directory, which
         # will typically be managed by Hydra's output directory system, or ./outputs
         out_dir = Path("outputs")

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
-import cv2
 import numpy as np
 import pytest
 import torch
@@ -65,10 +64,8 @@ class _CameraInfo(NamedTuple):
     T: np.ndarray
     FovY: float
     FovX: float
-    depth_params: dict | None
     image_path: str
     image_name: str
-    depth_path: str
     width: int
     height: int
     is_test: bool
@@ -143,10 +140,8 @@ def test_trainer_initializes_sh_from_rgb_and_scales_from_spacing(tmp_path, monke
                 T=np.zeros(3),
                 FovY=1.0,
                 FovX=1.0,
-                depth_params=None,
                 image_path=str(img_path),
                 image_name="img.png",
-                depth_path="",
                 width=2,
                 height=2,
                 is_test=False,
@@ -310,21 +305,6 @@ def test_train_step_applies_alpha_mask_before_loss(monkeypatch):
     trainer.gaussians.step_post_backward.assert_called_once()
     trainer.gaussians.step_optimizer.assert_called_once()
     assert trainer._timestep_iter == 1
-
-
-def test_camera_depth_loader_uses_reference_depth_scaling(tmp_path):
-    _mock_gsplat()
-    from clsplats.trainer import CLSplatsTrainer
-
-    depth_path = tmp_path / "depth.png"
-    cv2.imwrite(str(depth_path), np.full((2, 2), 2**15, dtype=np.uint16))
-    cam_info = mock.Mock(depth_path=str(depth_path))
-
-    colmap_depth = CLSplatsTrainer._load_invdepthmap(cam_info, is_nerf_synthetic=False)
-    blender_depth = CLSplatsTrainer._load_invdepthmap(cam_info, is_nerf_synthetic=True)
-
-    assert np.allclose(colmap_depth, 0.5)
-    assert np.allclose(blender_depth, 64.0)
 
 
 def test_gsplat_strategy_uses_original_3dgs_gradient_key_and_schedule():
