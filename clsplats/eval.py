@@ -17,7 +17,6 @@ Usage::
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -76,10 +75,10 @@ def _load_gaussians_from_ply(ply_path: str, cfg: CLSplatsConfig) -> CLGaussians:
         rest = np.stack([v[c] for c in rest_cols], axis=-1).astype(np.float32)  # (N, 3*(K-1))
         n_rest = rest.shape[1] // 3
         rest = rest.reshape(-1, n_rest, 3)  # (N, K-1, 3)
-        # sh_features layout in CLGaussians: (N, K, 3)
-        sh_features = np.concatenate([dc[:, None, :], rest], axis=1)
+        # PLY stores SH as (N, K, 3); CLGaussians keeps (N, 3, K).
+        sh_features = np.concatenate([dc[:, None, :], rest], axis=1).transpose(0, 2, 1)
     else:
-        sh_features = dc[:, None, :]  # (N, 1, 3) — DC only
+        sh_features = dc[:, :, None]  # (N, 3, 1) — DC only
 
     params = GaussianParams(
         positions=torch.from_numpy(xyz),
@@ -114,6 +113,7 @@ def _load_scene(
     change_type: Optional[str],
     timestep: int,
     eval_: bool,
+    white_background: bool = False,
 ) -> SceneInfo:
     """Load the correct scene for the requested *timestep*."""
     fmt = _detect_format(data_path)
@@ -126,13 +126,13 @@ def _load_scene(
                 raise SystemExit(1)
             return readNerfSyntheticInfo(
                 path=change_path,
-                white_background=False,
+                white_background=white_background,
                 depths="",
                 eval=eval_,
             )
         return readNerfSyntheticInfo(
             path=data_path,
-            white_background=False,
+            white_background=white_background,
             depths="",
             eval=eval_,
         )
@@ -174,6 +174,11 @@ def main(
     ),
     images: str = typer.Option("images", "--images", help="Images sub-folder name (COLMAP only)."),
     sh_degree: int = typer.Option(0, "--sh-degree", help="SH degree used during training."),
+    white_background: bool = typer.Option(
+        False,
+        "--white-background/--black-background",
+        help="Composite and render Blender scenes onto a white background.",
+    ),
 ) -> None:
     """Evaluate a saved CL-Splats checkpoint against a dataset's test split.
 
@@ -185,12 +190,15 @@ def main(
         logger.error("PLY file not found: {}", ply)
         raise SystemExit(1)
 
-    # Minimal config — only model.sh_degree matters for rendering
+    # Minimal config — only model.sh_degree and the background matter here
     cfg = CLSplatsConfig()
     cfg.model.sh_degree = sh_degree
+    cfg.white_background = white_background
 
     logger.info("Loading Gaussians from {}", ply_path)
     gaussians = _load_gaussians_from_ply(str(ply_path), cfg)
+    # The checkpoint was trained at full SH resolution.
+    gaussians.active_sh_degree = gaussians.max_sh_degree
     n = gaussians.params.positions.shape[0]
     logger.info("Loaded {:,} Gaussians.", n)
 
@@ -202,6 +210,7 @@ def main(
         change_type=change_type,
         timestep=timestep,
         eval_=True,
+        white_background=white_background,
     )
 
     if not scene.test_cameras:
@@ -220,6 +229,7 @@ def main(
     trainer.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trainer.timestep = timestep
     trainer.gaussians = gaussians
+    trainer._is_nerf_synthetic = scene.is_nerf_synthetic
 
     metrics = trainer.evaluate(
         test_cameras=scene.test_cameras,
