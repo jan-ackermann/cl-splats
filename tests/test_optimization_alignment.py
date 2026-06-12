@@ -341,20 +341,24 @@ def test_gsplat_strategy_uses_original_3dgs_gradient_key_and_schedule():
     assert gaussians.strategy.kwargs["reset_every"] == cfg.train.opacity_reset_interval
 
 
-def test_setup_timestep_disables_opacity_reset_in_cl_phase():
-    """The CL phase must never opacity-reset: inactive Gaussians can't recover."""
+def test_setup_timestep_cl_phase_never_touches_inactive_gaussians():
+    """The CL-phase strategy must not opacity-reset (inactive Gaussians can't
+    recover) nor opacity-prune globally (would delete frozen rows and break
+    exact history recovery)."""
     _mock_gsplat()
     from clsplats.config import CLSplatsConfig
 
     cfg = CLSplatsConfig()
     gaussians = _make_gaussians(n=2, cfg=cfg)
 
-    gaussians.setup_timestep(scene_scale=2.5, allow_opacity_reset=True)
+    gaussians.setup_timestep(scene_scale=2.5, cl_phase=False)
     assert gaussians.strategy.kwargs["reset_every"] == cfg.train.opacity_reset_interval
+    assert gaussians.strategy.kwargs["prune_opa"] == cfg.train.densify_prune_opa
     assert gaussians.strategy_state["scene_scale"] == 2.5
 
-    gaussians.setup_timestep(scene_scale=2.5, allow_opacity_reset=False)
+    gaussians.setup_timestep(scene_scale=2.5, cl_phase=True)
     assert gaussians.strategy.kwargs["reset_every"] > 10**9
+    assert gaussians.strategy.kwargs["prune_opa"] == 0.0
 
 
 def test_cl_masks_realign_through_strategy_split():
@@ -404,6 +408,30 @@ def test_cl_masks_realign_through_strategy_prune():
     assert new_active is not None and new_counts is not None
     assert new_active.tolist() == [True, True, False]
     assert new_counts.tolist() == [1, 3, 4]
+
+
+def test_prune_preserves_surviving_raw_values_bitwise():
+    """Pruning must subset raw tensors, not round-trip them through the
+    activated view (normalize/sigmoid/exp) — survivors stay bit-identical,
+    which exact history recovery depends on."""
+    _mock_gsplat()
+
+    gaussians = _make_gaussians(n=4)
+    device = gaussians.device
+    # Un-normalised quats and extreme opacity logits are exactly the values
+    # an activation round-trip would corrupt.
+    gaussians.strategy_params["quats"].data = torch.randn(4, 4, device=device) * 3.0
+    gaussians.strategy_params["opacities"].data = torch.tensor(
+        [20.0, -20.0, 0.3, 5.0], device=device
+    )
+    before = {k: v.detach().clone() for k, v in gaussians.strategy_params.items()}
+
+    keep = gaussians.prune_gaussians(torch.tensor([False, True, False, False]))
+
+    surviving = torch.nonzero(keep).squeeze(-1)
+    for key, old in before.items():
+        new = gaussians.strategy_params[key].detach()
+        assert torch.equal(new, old[surviving]), key
 
 
 def test_trainer_prune_keeps_cl_flags_aligned():
