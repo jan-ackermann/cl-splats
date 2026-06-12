@@ -308,6 +308,10 @@ I continue to release the missing modules required to replicate our method.
 - [x] Verify codebase.
 - [ ] Release history recovery.
 
+## Disclaimer
+
+Parts of this public reimplementation were developed and verified with the help of Claude (Anthropic's AI coding assistant). While the pipeline has been tested end to end on the released benchmark data, discrepancies with the original paper implementation may exist. If you notice any, please reach out via the email listed on [my website](https://janackermann.info).
+
 ## Citation
 ```
 @inproceedings{ackermann2025clsplats,
