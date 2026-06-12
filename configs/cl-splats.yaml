@@ -4,10 +4,29 @@
 model:
   sh_degree: 0
   init_scale: 0.01
-  init_opacity: 0.5
+  init_opacity: 0.1
 
 train:
   lr: 1e-3
+  position_lr_init: 1.6e-4
+  position_lr_final: 1.6e-6
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000
+  feature_lr: 2.5e-3
+  opacity_lr: 2.5e-2
+  scaling_lr: 5e-3
+  rotation_lr: 1e-3
+  lambda_dssim: 0.2
+  percent_dense: 0.01
+  densify_from_iter: 500
+  densify_until_iter: 15000
+  densification_interval: 100
+  densify_grad_threshold: 2e-4
+  densify_prune_opa: 0.005
+  densify_prune_scale3d: 0.1
+  opacity_reset_interval: 3000
+  densify_absgrad: false
+  densify_verbose: false
   iters_per_timestep: 100
   log_interval: 10
   num_times: 1
@@ -53,3 +72,4 @@ images: "images"
 depths: ""
 eval: false
 train_test_exp: false
+white_background: false

@@ -16,7 +16,7 @@ class ModelConfig:
 
     sh_degree: int = 0
     init_scale: float = 0.01
-    init_opacity: float = 0.5
+    init_opacity: float = 0.1
 
 
 @dataclass
@@ -24,6 +24,25 @@ class TrainConfig:
     """Training loop settings."""
 
     lr: float = 1e-3
+    position_lr_init: float = 1.6e-4
+    position_lr_final: float = 1.6e-6
+    position_lr_delay_mult: float = 0.01
+    position_lr_max_steps: int = 30_000
+    feature_lr: float = 2.5e-3
+    opacity_lr: float = 2.5e-2
+    scaling_lr: float = 5e-3
+    rotation_lr: float = 1e-3
+    lambda_dssim: float = 0.2
+    percent_dense: float = 0.01
+    densify_from_iter: int = 500
+    densify_until_iter: int = 15_000
+    densification_interval: int = 100
+    densify_grad_threshold: float = 2e-4
+    densify_prune_opa: float = 0.005
+    densify_prune_scale3d: float = 0.1
+    opacity_reset_interval: int = 3000
+    densify_absgrad: bool = False
+    densify_verbose: bool = False
     iters_per_timestep: int = 100
     log_interval: int = 10
     num_times: int = 1
@@ -93,6 +112,9 @@ class CLSplatsConfig:
     depths: str = ""
     eval: bool = False
     train_test_exp: bool = False
+    # Blender/NeRF-Synthetic: composite GT and render onto a white background
+    # (the benchmark convention) instead of black.
+    white_background: bool = False
 
     # Wandb integration
     wandb_project: str = "cl-splats"
