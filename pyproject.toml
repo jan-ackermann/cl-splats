@@ -45,6 +45,7 @@ dev = [
 [project.scripts]
 cl-splats-train = "clsplats.train:app"
 cl-splats-eval = "clsplats.eval:app"
+cl-splats-history = "clsplats.history:app"
 cl-splats-preprocess = "clsplats.utils.preprocessing:main"
 
 [tool.setuptools.packages.find]

@@ -189,17 +189,25 @@ class CLGaussians:
             for name, param in self.strategy_params.items()
         }
 
-    def _build_strategy(self, allow_opacity_reset: bool = True):
+    def _build_strategy(self, cl_phase: bool = False):
+        """Build the gsplat strategy; the CL phase must not touch inactive Gaussians.
+
+        During continual learning the opacity reset is disabled (inactive
+        Gaussians could never recover through masked gradients) and the
+        strategy's *global* opacity pruning is disabled too — it would
+        delete frozen scene rows and break exact history recovery. The
+        trainer prunes low-opacity *active* Gaussians instead.
+        """
         train_cfg = self.cfg.train
         return gsplat.DefaultStrategy(
-            prune_opa=train_cfg.densify_prune_opa,
+            prune_opa=0.0 if cl_phase else train_cfg.densify_prune_opa,
             grow_grad2d=train_cfg.densify_grad_threshold,
             grow_scale3d=train_cfg.percent_dense,
             prune_scale3d=train_cfg.densify_prune_scale3d,
             refine_start_iter=train_cfg.densify_from_iter,
             refine_stop_iter=train_cfg.densify_until_iter,
             refine_every=train_cfg.densification_interval,
-            reset_every=train_cfg.opacity_reset_interval if allow_opacity_reset else _NEVER,
+            reset_every=_NEVER if cl_phase else train_cfg.opacity_reset_interval,
             absgrad=train_cfg.densify_absgrad,
             verbose=train_cfg.densify_verbose,
             key_for_gradient="means2d",
@@ -209,30 +217,17 @@ class CLGaussians:
         """Reset gsplat strategy state using the scene scale."""
         self.strategy_state = self.strategy.initialize_state(scene_scale=scene_scale)
 
-    def setup_timestep(self, scene_scale: float, allow_opacity_reset: bool = True) -> None:
+    def setup_timestep(self, scene_scale: float, cl_phase: bool = False) -> None:
         """(Re)build the strategy for a new timestep with a fresh step counter.
 
         The trainer drives the strategy with a per-timestep iteration so the
-        densification window applies at every timestep. ``allow_opacity_reset``
-        must be False during the CL phase: gsplat's reset clamps *all*
-        opacities, and inactive Gaussians could never recover because their
-        gradients are masked.
+        densification window applies at every timestep. With ``cl_phase``
+        the strategy is configured to never modify inactive Gaussians (no
+        opacity reset, no global opacity pruning) — see ``_build_strategy``.
         """
-        self.strategy = self._build_strategy(allow_opacity_reset=allow_opacity_reset)
+        self.strategy = self._build_strategy(cl_phase=cl_phase)
         self.strategy.check_sanity(self.strategy_params, self.optimizers)
         self.strategy_state = self.strategy.initialize_state(scene_scale=scene_scale)
-
-    def _replace_params(
-        self,
-        params: GaussianParams,
-        cl_active: Optional[torch.Tensor] = None,
-        cl_outside_count: Optional[torch.Tensor] = None,
-    ) -> None:
-        self.strategy_params = self._make_param_dict(params, cl_active, cl_outside_count)
-        self.params = GaussianParamView(self)
-        self.optimizers = self._build_optimizers()
-        self.optimizer = self.optimizers["means"]
-        self.strategy.check_sanity(self.strategy_params, self.optimizers)
 
     @property
     def num_gaussians(self) -> int:
@@ -369,19 +364,20 @@ class CLGaussians:
         prune_mask = prune_mask.to(self.device)
         keep = ~prune_mask
 
-        params = GaussianParams(
-            positions=self.params.positions[keep],
-            scales=self.params.scales[keep],
-            quats=self.params.quats[keep],
-            sh_features=self.params.sh_features[keep],
-            opacity=self.params.opacity[keep],
+        # Subset the raw tensors directly. Round-tripping through the
+        # activated view (exp/log, sigmoid/logit, quat normalisation) would
+        # perturb every surviving row numerically and break exact history
+        # recovery of the frozen scene.
+        self.strategy_params = nn.ParameterDict(
+            {
+                name: nn.Parameter(param.detach()[keep].clone())
+                for name, param in self.strategy_params.items()
+            }
         )
-
-        self._replace_params(
-            params,
-            cl_active=self.strategy_params["cl_active"].detach()[keep],
-            cl_outside_count=self.strategy_params["cl_outside_count"].detach()[keep],
-        )
+        self.params = GaussianParamView(self)
+        self.optimizers = self._build_optimizers()
+        self.optimizer = self.optimizers["means"]
+        self.strategy.check_sanity(self.strategy_params, self.optimizers)
         self.initialize_strategy_state(self.strategy_state.get("scene_scale", 1.0))
         log.debug(
             "Pruned %d Gaussians (%d remain).",

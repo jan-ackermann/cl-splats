@@ -22,6 +22,7 @@ from clsplats.config import CLSplatsConfig
 from clsplats.constraints.primitives import fit_primitives_for_active, union_distance
 from clsplats.dataset.cameras import Camera
 from clsplats.dataset.dataset_reader import SceneInfo
+from clsplats.history import HistoryRecorder
 from clsplats.lifter.depth_anything_lifter import DepthAnythingLifter
 from clsplats.representation.cl_gaussians import CLGaussians, GaussianParams
 from clsplats.utils.sh_utils import RGB2SH
@@ -150,6 +151,7 @@ class CLSplatsTrainer:
         self._viewpoint_indices: list[int] = []
         self.scene_extent = float(scene.nerf_normalization.get("radius", 1.0))
         self._is_nerf_synthetic = bool(scene.is_nerf_synthetic)
+        self._history = HistoryRecorder()
 
         # 1) Initialise Gaussians from scene point cloud
         pcd = scene.point_cloud
@@ -294,10 +296,11 @@ class CLSplatsTrainer:
         is_initial = timestep == start_time
 
         # Fresh strategy + state per timestep: the densification window is
-        # driven by the per-timestep iteration, and the global opacity reset
-        # must not run during the CL phase (it would clamp the opacities of
-        # inactive Gaussians, which can never recover through masked grads).
-        self.gaussians.setup_timestep(self.scene_extent, allow_opacity_reset=is_initial)
+        # driven by the per-timestep iteration, and during the CL phase the
+        # strategy must never modify inactive Gaussians (no opacity reset,
+        # no global opacity pruning) — they are frozen by contract, which
+        # also makes history recovery exact.
+        self.gaussians.setup_timestep(self.scene_extent, cl_phase=not is_initial)
 
         if is_initial:
             N = self.gaussians.params.positions.shape[0]
@@ -335,6 +338,14 @@ class CLSplatsTrainer:
         # moments so leftover momentum from earlier timesteps cannot move
         # them despite masked gradients.
         self.gaussians.reset_inactive_optimizer_state(self.active_mask)
+
+        # Snapshot the active rows before any optimisation — together with
+        # the end-of-timestep active mask this is the complete delta needed
+        # to recover the previous scene state exactly.
+        if self.cfg.history.log_history and self.active_mask is not None:
+            self._history.begin_timestep(
+                timestep, self.active_mask, self.gaussians.strategy_params
+            )
 
         # Fit geometric primitives around active Gaussians
         if self.active_mask is not None and self.active_mask.any():
@@ -508,10 +519,18 @@ class CLSplatsTrainer:
             d_union_now = union_distance(
                 self.gaussians.params.positions.detach(), self._primitives
             )
-        outside = (d_union_now > prune_dist) & self.active_mask.to(self.device)
+        active = self.active_mask.to(self.device)
+        outside = (d_union_now > prune_dist) & active
         self._outside_counts[outside] += 1
         self._outside_counts[~outside] = 0
         prune_mask = self._outside_counts >= prune_consec
+        # gsplat's global opacity pruning is disabled in the CL phase (it
+        # would touch frozen Gaussians); apply it here to the active set.
+        with torch.no_grad():
+            low_opacity = self.gaussians.params.opacity.squeeze(-1) < (
+                self.cfg.train.densify_prune_opa
+            )
+        prune_mask = prune_mask | (low_opacity & active)
         if prune_mask.any():
             keep = self.gaussians.prune_gaussians(prune_mask)
             self.active_mask = self.active_mask[keep]
@@ -566,6 +585,17 @@ class CLSplatsTrainer:
                     num_iters=num_iters,
                     loss=stats["loss"],
                 )
+
+        # Finalise the history delta for this timestep with the active
+        # lineage of the resulting array (densified children included).
+        if (
+            self.cfg.history.log_history
+            and self._history.records
+            and self._history.records[-1].timestep == self.timestep
+            and self._history.records[-1].active_end_mask is None
+            and self.active_mask is not None
+        ):
+            self._history.end_timestep(self.active_mask)
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -731,3 +761,9 @@ class CLSplatsTrainer:
         ply_path = out_dir / f"gaussians_time_{self.timestep:04d}.ply"
         self.gaussians.export_ply(str(ply_path))
         logger.info("Exported optimized Gaussians to {path}", path=ply_path)
+
+        # Persist the per-timestep deltas for cl-splats-history.
+        if self._history.records:
+            history_dir = out_dir / "history"
+            self._history.save(history_dir)
+            logger.info("Saved history records to {path}", path=history_dir)
